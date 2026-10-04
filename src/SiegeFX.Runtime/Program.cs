@@ -255,6 +255,33 @@ else if (args.Length >= 1 && args[0] == "--selftest-dialogue")
     // up choice=more / quest_dialog / no-order-tail correctly.
     return SiegeFX.Runtime.DialogueSelfTest.Run() ? 0 : 1;
 }
+else if (args.Length >= 1 && args[0] == "--identify")
+{
+    // `SiegeFX.exe --identify [dir]` — the release zip ships without the
+    // siegefx CLI, so the game exe carries `siegefx install identify` too.
+    // No window: hash the install, print the Markdown report and keep a
+    // copy beside the session logs for attaching to an issue.
+    var dir = args.Length >= 2 ? args[1] : ResolveDs1Resources();
+    if (dir is null)
+    {
+        Console.Error.WriteLine("siegefx: no Dungeon Siege install found; pass its folder: SiegeFX.exe --identify \"<folder>\"");
+        return 1;
+    }
+    Console.Error.WriteLine("hashing every tank (about a minute for a full install)...");
+    var report = SiegeFX.Core.Install.InstallReportText.ToMarkdown(
+        SiegeFX.Core.Install.InstallIdentifier.Scan(dir));
+    Console.WriteLine(report);
+    try
+    {
+        var reportPath = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SiegeFX", "logs", $"install-report-{DateTime.Now:yyyyMMdd-HHmmss}.md");
+        System.IO.File.WriteAllText(reportPath, report);
+        Console.Error.WriteLine($"saved: {reportPath}");
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"could not save the report: {ex.Message}"); }
+    return 0;
+}
 else if (args.Length >= 1 && args[0] == "--skrit-anim")
 {
     // Phase 9a. Rigged ASP + skrit that decides which clip plays. Optional trailing
@@ -287,29 +314,22 @@ else if (args.Length == 0)
     // user gets a friendly hint instead of a silent black window.
     bootMode = true;
     ds1Resources = ResolveDs1Resources();
-    // ALPHA-PACKAGING — tank byte-size integrity check (warn-only). Known-
-    // good sizes are the GOG 1.11 set; Steam/disc editions may differ and
-    // still work, but a truncated download or a modded tank is the #1
-    // "engine acts weird" cause a tester can self-diagnose from this line.
+    // ALPHA-PACKAGING — name the game data in the log (warn-only). The
+    // header-only scan matches the install against KnownReleases, so a
+    // truncated download, a modded tank or an uncatalogued edition is the
+    // first thing a tester (and a bug report) sees. Hashing is left to
+    // `siegefx install identify`.
     if (ds1Resources is not null)
     {
-        var known = new (string Name, long Size)[]
-        {
-            ("Logic.dsres",   4_206_896),
-            ("Objects.dsres", 304_438_568),
-            ("Sound.dsres",   185_343_092),
-            ("Terrain.dsres", 410_230_240),
-            ("Voices.dsres",  45_951_736),
-        };
-        foreach (var (name, size) in known)
-        {
-            var p = System.IO.Path.Combine(ds1Resources, name);
-            if (!System.IO.File.Exists(p))
+        foreach (var name in new[] { "Logic.dsres", "Objects.dsres", "Sound.dsres", "Terrain.dsres", "Voices.dsres" })
+            if (!System.IO.File.Exists(System.IO.Path.Combine(ds1Resources, name)))
                 Console.WriteLine($"[data] warning: {name} missing from '{ds1Resources}'");
-            else if (new System.IO.FileInfo(p).Length != size)
-                Console.WriteLine($"[data] note: {name} is {new System.IO.FileInfo(p).Length:N0} bytes " +
-                                  $"(known-good GOG: {size:N0}) — other editions/mods may work but are untested");
+        try
+        {
+            var install = SiegeFX.Core.Install.InstallIdentifier.Scan(ds1Resources, hash: false);
+            Console.WriteLine($"[data] {SiegeFX.Core.Install.KnownReleases.Describe(install)}");
         }
+        catch (Exception ex) { Console.WriteLine($"[data] install scan failed: {ex.Message}"); }
     }
     if (ds1Resources is null)
     {

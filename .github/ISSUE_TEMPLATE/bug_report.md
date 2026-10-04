@@ -19,7 +19,7 @@ Region / landmark (e.g. "farmlands, bridge by the stream"), and roughly what you
 The release zip name or the version shown in the log (e.g. `v0.0.3`).
 
 **Your DS1 data source**
-GOG / Steam / original discs.
+GOG / Steam / original discs (and Legends of Aranna, if installed). If you can, also paste the output of `siegefx install identify "<your Dungeon Siege folder>"`: it pins the exact data version.
 
 **Session log**
 Please attach the newest file from `%LOCALAPPDATA%\SiegeFX\logs\` — it records what the engine was doing and usually pins the cause immediately.

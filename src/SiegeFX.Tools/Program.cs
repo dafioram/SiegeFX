@@ -44,6 +44,7 @@ try
         "tsd"       => DispatchTsd(args[1..]),
         "quests"    => DispatchQuests(args[1..]),
         "weapons"   => DispatchWeapons(args[1..]),
+        "install"   => InstallCommands.Dispatch(args[1..]),
         _      => UnknownCommand(args[0]),
     };
 }
@@ -78,6 +79,7 @@ static void PrintUsage()
     Console.WriteLine("SiegeFX CLI");
     Console.WriteLine();
     Console.WriteLine("Usage:");
+    Console.WriteLine("  siegefx install identify [install-dir] [--fast] [--json]   (which game data is this?)");
     Console.WriteLine("  siegefx tank info    <tank>");
     Console.WriteLine("  siegefx tank list    <tank> [--prefix=PATH] [--ext=.EXT]");
     Console.WriteLine("  siegefx tank extract <tank> <resource-path> [dest-file]");

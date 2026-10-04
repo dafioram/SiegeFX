@@ -36,6 +36,27 @@ Most of the groundwork is other people's — see [Credits & prior art](#credits-
 
 The full per-phase development log, roadmap, and what's queued live on the [**wiki**](https://github.com/codingncaffeine/SiegeFX/wiki) — start at [Status](https://github.com/codingncaffeine/SiegeFX/wiki/Status), [Architecture](https://github.com/codingncaffeine/SiegeFX/wiki/Architecture), [Building and Running](https://github.com/codingncaffeine/SiegeFX/wiki/Building-and-Running), or [Engine Quirks and Stumbles](https://github.com/codingncaffeine/SiegeFX/wiki/Engine-Quirks-and-Stumbles).
 
+## Game data editions
+
+SiegeFX has been developed against the **GOG release of Dungeon Siege (game version 1.11)**. Retail CDs, their official patches and the Steam release are expected to work but haven't been verified yet. *Legends of Aranna* isn't playable yet; reports from LoA installs will show how its data is laid out.
+
+To see exactly which data you have, run:
+
+```
+siegefx install identify "C:\GOG Games\Dungeon Siege"
+```
+
+or, from a release zip (which doesn't include the `siegefx` CLI), `SiegeFX.exe --identify`. The game exe finds your install the same way it does at boot, and also saves the report to `%LOCALAPPDATA%\SiegeFX\logs`.
+
+The report lists every resource tank with its header (product version, build, priority: factory, patch or expansion) and SHA-256 hashes for the tanks and the game executables. It never modifies anything, and the Markdown it prints pastes straight into an issue. The CLI also takes `--fast` (headers only, no hashing) and `--json`. The game logs a one-line edition check at every startup. Reports from new editions are how this table grows:
+
+| Edition | Status | Verified by |
+|---|---|---|
+| Dungeon Siege 1.11 (GOG) | Supported | Tank sizes |
+| Retail CD (any patch level) | Untested | Reports wanted |
+| Steam | Untested | Reports wanted |
+| Legends of Aranna | Not playable yet | Reports wanted |
+
 ## Project layout
 
 ```
