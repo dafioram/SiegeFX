@@ -24621,6 +24621,9 @@ void main()
                             switch (SiegeFX.Core.Actors.HeroApproach.Decide(pdist, r, lineBlocked, _playerFollower.PathBlocked))
                             {
                                 case SiegeFX.Core.Actors.HeroApproachStep.Act:
+                                    // In reach: stop the walk here (it was
+                                    // pathing to the target itself).
+                                    _playerFollower.SetTarget(after);
                                     PerformPlayerSwing(pat, atk);
                                     // A swing can't start mid-cast or mid-drink:
                                     // keep the order until one does.
@@ -24632,11 +24635,13 @@ void main()
                                         $"(dist={pdist:F1}u, no path)");
                                     _pendingAttackTarget = null;
                                     break;
-                                case SiegeFX.Core.Actors.HeroApproachStep.CloseIn:
-                                    _playerFollower.SetTarget(tp);
-                                    break;
                                 default:
-                                    _playerFollower.SetTarget(ComputeApproachPoint(after, tp, r));
+                                    // Path to the target itself, as a chasing
+                                    // monster does; the walk ends the tick the
+                                    // hero is in reach with a clear line. A
+                                    // straight-line stand point could sit in a
+                                    // river or behind a cliff and fail.
+                                    _playerFollower.SetTarget(tp);
                                     break;
                             }
                         }
@@ -24675,6 +24680,7 @@ void main()
                             switch (SiegeFX.Core.Actors.HeroApproach.Decide(cdist, pcSpell.CastRange, cBlocked, _playerFollower.PathBlocked))
                             {
                                 case SiegeFX.Core.Actors.HeroApproachStep.Act:
+                                    _playerFollower.SetTarget(after);
                                     BeginPlayerCast(_pendingCastSlot, pcSpell,
                                         _pendingCastTarget, _pendingCastProp,
                                         _progression?.Level ?? 1);
@@ -24686,12 +24692,13 @@ void main()
                                     _pendingCastTarget = null;
                                     _pendingCastProp = null;
                                     break;
-                                case SiegeFX.Core.Actors.HeroApproachStep.CloseIn:
-                                    _playerFollower.SetTarget(pcPos);
-                                    break;
                                 default:
-                                    _playerFollower.SetTarget(ComputeApproachPoint(
-                                        after, pcPos, MathF.Max(1.5f, pcSpell.CastRange * 0.9f)));
+                                    // Path to an actor itself (see the attack
+                                    // drive); a prop blocks its own footprint,
+                                    // so walk to a free stand point by it.
+                                    _playerFollower.SetTarget(_pendingCastProp is not null
+                                        ? FindWalkableApproach(after, pcPos, MathF.Max(1.5f, pcSpell.CastRange * 0.9f))
+                                        : pcPos);
                                     break;
                             }
                         }
@@ -24721,6 +24728,7 @@ void main()
                             switch (SiegeFX.Core.Actors.HeroApproach.Decide(bdist, bReach, bBlocked, _playerFollower.PathBlocked))
                             {
                                 case SiegeFX.Core.Actors.HeroApproachStep.Act:
+                                    _playerFollower.SetTarget(after);
                                     // PerformPropBreak no-ops while a swing/cast is
                                     // in flight — keep the latch so the next tick
                                     // retries instead of dropping the click.
@@ -30254,10 +30262,9 @@ void main()
             _pendingCastTarget = null;
             _pendingCastProp = null;
             _pendingBreakProp = null;
-            // Walk to a point just inside reach on the player→target line so
-            // the follower stops at swinging distance instead of plowing in.
-            var stop = ComputeApproachPoint(pPos, tPos, reach);
-            _playerFollower?.SetTarget(stop);
+            // Path to the target; the per-tick drive stops the walk as soon
+            // as the hero is in reach with a clear line.
+            _playerFollower?.SetTarget(tPos);
             Console.WriteLine(
                 $"click-attack: approaching {best.Actor.Template.Name} " +
                 $"(dist={playerDist:F1}u, reach={reach:F1}u)");
@@ -36745,8 +36752,7 @@ void main()
                 _pendingAttackTarget = null;
                 _pendingPickupPile = null;
                 _pendingBreakProp = null;
-                _playerFollower?.SetTarget(ComputeApproachPoint(
-                    playerPos, cp, MathF.Max(1.5f, spell.CastRange * 0.9f)));
+                _playerFollower?.SetTarget(cp);
                 Console.WriteLine($"click-cast: approaching corpse {corpse.Actor.Template.Name} " +
                                   $"(dist={kdist:F1}u, range={spell.CastRange:F1}u)");
                 return;
@@ -36835,7 +36841,7 @@ void main()
                         _pendingAttackTarget = null;
                         _pendingPickupPile = null;
                         _pendingBreakProp = null;
-                        _playerFollower?.SetTarget(ComputeApproachPoint(
+                        _playerFollower?.SetTarget(FindWalkableApproach(
                             playerPos, bpPos, MathF.Max(1.5f, spell.CastRange * 0.9f)));
                         Console.WriteLine($"click-cast: approaching {bestProp.Template} " +
                                           $"(dist={bdist:F1}u, range={spell.CastRange:F1}u)");
@@ -36865,8 +36871,7 @@ void main()
                 _pendingAttackTarget = null;
                 _pendingPickupPile = null;
                 _pendingBreakProp = null;
-                _playerFollower?.SetTarget(ComputeApproachPoint(
-                    playerPos, ctp, MathF.Max(1.5f, spell.CastRange * 0.9f)));
+                _playerFollower?.SetTarget(ctp);
                 Console.WriteLine($"click-cast: approaching {best.Actor.Template.Name} " +
                                   $"(dist={cdist:F1}u, range={spell.CastRange:F1}u)");
                 return;
