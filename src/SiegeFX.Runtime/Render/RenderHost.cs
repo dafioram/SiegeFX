@@ -1026,6 +1026,9 @@ public sealed class RenderHost : IDisposable
     private SiegeFX.Core.Actors.PcontentResolver? _pcontentResolver;
     private readonly Random _pcontentRng = new(0x5165DEF1);
     private SiegeFX.Core.Assets.FormulasStore? _formulas;
+    // The weapon card's attack-speed words, from the install's
+    // speed_gui_lookup.gas; null leaves the line off the card.
+    private SiegeFX.Core.Assets.SpeedGuiLookup? _speedGui;
     // Phase 16d — player XP/level state. Created right after the PC spawns once
     // _formulas is also live; null-guarded everywhere because viewer modes that
     // don't TrySpawnPlayer leave both at null and we still want the world to load.
@@ -13983,6 +13986,8 @@ void main()
         // engine should still render the world without leveling.
         try { _formulas = SiegeFX.Core.Assets.FormulasStore.LoadFromTank(logicReader); }
         catch (Exception ex) { Console.WriteLine($"  formulas.gas load failed: {ex.Message} (regen disabled)"); }
+        try { _speedGui = SiegeFX.Core.Assets.SpeedGuiLookup.LoadFromTank(logicReader); }
+        catch (Exception ex) { Console.WriteLine($"  speed_gui_lookup.gas load failed: {ex.Message} (no attack-speed line on weapon cards)"); }
 
         // Combat pack — install the session's combat constants + difficulty so
         // every live swing/cast resolves through the authored multipliers.
@@ -32991,16 +32996,19 @@ void main()
         if (isWeapon)
         {
             // SC-TOOLTIP-AUTH — retail's weapon card lines (screen 0026:
-            // "Normal Attack Speed / Two Handed Weapon / Damage: 5 to 9 /
-            // Range: 10 Meters"). Speed derives from the authored
-            // [attack] reload_delay (the short bow's 0.3 reads Normal);
-            // handedness from is_two_handed; Range shows for standoff
+            // speed / handedness / damage / range). Speed derives from the
+            // authored [attack] reload_delay (the short bow's 0.3 reads as
+            // the normal tier); its words are speed_gui_lookup.gas's [normal]
+            // and [slow] screen_name. Retail picks among all eight tiers by
+            // animation time + reload delay; that is not modelled yet.
+            // Handedness from is_two_handed; Range shows for standoff
             // weapons only (melee reaches ~2u and retail omits it).
             float reload = 0f;
             float.TryParse(_templateStore.GetAttribute(tpl, "attack", "reload_delay"),
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out reload);
-            lines.Add((reload <= 0.45f ? "Normal Attack Speed" : "Slow Attack Speed", dim));
+            if (_speedGui?.ScreenName(reload <= 0.45f ? "normal" : "slow") is { } speedWords)
+                lines.Add((speedWords, dim));
             bool twoHanded = (_templateStore.GetAttribute(tpl, "attack", "is_two_handed") ?? "")
                 .Contains("true", StringComparison.OrdinalIgnoreCase);
             lines.Add((twoHanded ? "Two Handed Weapon" : "One Handed Weapon", dim));
