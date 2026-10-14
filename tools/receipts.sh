@@ -5,6 +5,11 @@
 # goldens/sfx-timelines. Exit 0 only when every step passes. Needs a Dungeon
 # Siege install for everything after the unit tests.
 #
+# Two guards keep the original game's content respected: guard-repo (no game
+# files in git) and install-untouched (no file in the install changed during
+# the run). Every run writes scratch/receipts/summary.md, ready to paste into a
+# pull request.
+#
 #   tools/receipts.sh [--ds1=PATH] [--update-baseline]
 #
 # The install comes from --ds1, else SIEGEFX_DS1, else the first line of
@@ -21,7 +26,7 @@ for arg in "$@"; do
     case "$arg" in
         --ds1=*) ds1=${arg#--ds1=} ;;
         --update-baseline) update=true ;;
-        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "receipts: unknown argument $arg" >&2; exit 2 ;;
     esac
 done
@@ -39,13 +44,17 @@ work="$repo/scratch/receipts"
 rm -rf "$work"
 mkdir -p "$work/profile/data" "$work/profile/config"
 failed=0
+results=()   # "name|PASS|seconds" for the summary
 step() {
     local name=$1; shift
+    local t0=$SECONDS
     if "$@" > "$work/$name.log" 2>&1; then
         echo "PASS  $name"
+        results+=("$name|PASS|$((SECONDS - t0))")
     else
         echo "FAIL  $name  (log: $work/$name.log)"
         tail -5 "$work/$name.log" | sed 's/^/        /'
+        results+=("$name|FAIL|$((SECONDS - t0))")
         failed=1
     fi
 }
@@ -54,13 +63,19 @@ step build "$dotnet" build "$repo/SiegeFX.sln" -c Release --nologo -warnaserror
 step tests "$dotnet" test "$repo/tests/SiegeFX.Tests" -c Release --no-build --nologo
 step test-menu "$repo/tools/test-menu.sh" --check
 
+cli="$repo/src/SiegeFX.Tools/bin/Release/net10.0/siegefx"
+step guard-repo "$cli" guard repo "$repo"
+
+# Everything after this reads the install; it must leave it as it found it.
+snapshot="$work/install-before.txt"
+"$cli" guard install "$ds1" --snapshot="$snapshot" > "$work/install-snapshot.log" 2>&1 || snapshot=""
+
 game="$repo/src/SiegeFX.Runtime/bin/Release/net10.0/SiegeFX"
 for t in save dialogue net; do
     step "selftest-$t" env XDG_DATA_HOME="$work/profile/data" XDG_CONFIG_HOME="$work/profile/config" \
         SIEGEFX_DS1="$ds1" ALSOFT_DRIVERS=null timeout 180 "$game" "--selftest-$t"
 done
 
-cli="$repo/src/SiegeFX.Tools/bin/Release/net10.0/siegefx"
 baseline="$repo/goldens/parity-ledger.baseline.txt"
 step parity-ledger "$cli" parity ledger "$ds1" --out="$work/parity" --baseline="$baseline"
 sed -n '/^  section/,/^$/p' "$work/parity-ledger.log"
@@ -83,6 +98,12 @@ else
     step sfx-goldens sfx_goldens
 fi
 
+if [ -n "$snapshot" ]; then
+    step install-untouched "$cli" guard install "$ds1" --compare="$snapshot"
+else
+    step install-untouched false
+fi
+
 if $update && [ $failed -eq 0 ]; then
     "$cli" parity ledger "$ds1" --write-baseline="$baseline" > /dev/null && echo "baseline updated: $baseline"
     rm -rf "$work/sfx-timelines"
@@ -91,4 +112,36 @@ if $update && [ $failed -eq 0 ]; then
         echo "effect goldens regenerated: $(git -C "$repo" status --short -- goldens/sfx-timelines | wc -l) files changed"
     fi
 fi
+
+# The summary a pull request carries: what ran, on what, and how it went.
+# No local paths, so it can be pasted as is.
+summary="$work/summary.md"
+{
+    echo "### Receipts"
+    echo
+    printf '`%s` at `%s` · %s · .NET SDK %s · %s\n' \
+        "$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null)" "$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)" \
+        "$(uname -s)" "$("$dotnet" --version 2>/dev/null)" "$(date -u +%Y-%m-%d)"
+    [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ] && echo && echo "_Uncommitted changes were present._"
+    echo
+    echo "| Step | Result | Time |"
+    echo "|---|---|---|"
+    for r in "${results[@]}"; do
+        IFS='|' read -r name result secs <<< "$r"
+        echo "| $name | $result | ${secs:+${secs}s} |"
+    done
+    ledger=$(sed -n '/^  section/,/^$/p' "$work/parity-ledger.log" 2>/dev/null)
+    if [ -n "$ledger" ]; then
+        echo
+        echo "<details><summary>Parity ledger</summary>"
+        echo
+        echo '```'
+        echo "$ledger"
+        sed -n '/^against baseline/,$p' "$work/parity-ledger.log" | sed 's#^\(against baseline \).*\(goldens/\)#\1\2#'
+        echo '```'
+        echo
+        echo "</details>"
+    fi
+} > "$summary"
+echo "summary for the pull request: $summary"
 exit $failed
