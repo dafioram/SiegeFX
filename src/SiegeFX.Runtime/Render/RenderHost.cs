@@ -1813,9 +1813,10 @@ public sealed class RenderHost : IDisposable
     /// walk in one frame).</summary>
     private const float ClipBlendSeconds = 0.2f;
 
-    /// <summary>The crossfade into a pinned chore (a swing, a cast): short,
-    /// so the fade doesn't eat the wind-up and the swing shows its full arc.
-    /// Leaving the chore back to idle or walk keeps the longer fade.</summary>
+    /// <summary>The crossfade into a strike (a swing or cast clip, one with a
+    /// FIRE note): short, so the fade doesn't eat the wind-up and the swing
+    /// shows its full arc. Every other change, including into the
+    /// between-swings guard pad, keeps the longer fade.</summary>
     private const float ChoreBlendSeconds = 0.08f;
 
     /// <summary>The clip slot an actor shows: its walk cycle while it moves,
@@ -1838,6 +1839,66 @@ public sealed class RenderHost : IDisposable
         clip.AnimLength <= 0f ? 0f
         : s.IsDead ? MathF.Min((float)s.AnimTime, clip.AnimLength - 0.01f)
         : (float)(s.AnimTime % clip.AnimLength);
+
+    private SwingTrailRenderer? _swingTrails;
+    private readonly Dictionary<SiegeFX.Core.Assets.PrsAnimation, (float Begin, float End)> _swingWindows = new();
+
+    /// <summary>SC-SWING-TRAIL — the clip's authored swing window in seconds
+    /// (its BSWG and ESWG notes); (0, 0) when it authors none.</summary>
+    private (float Begin, float End) SwingWindow(SiegeFX.Core.Assets.PrsAnimation clip)
+    {
+        if (_swingWindows.TryGetValue(clip, out var w)) return w;
+        var b = SiegeFX.Core.Actors.AnimNotes.Times(clip, SiegeFX.Core.Actors.AnimNotes.BeginSwing);
+        var e = SiegeFX.Core.Actors.AnimNotes.Times(clip, SiegeFX.Core.Actors.AnimNotes.EndSwing);
+        w = b.Length > 0 && e.Length > 0 && e[^1] > b[0] ? (b[0], e[^1]) : (0f, 0f);
+        _swingWindows[clip] = w;
+        return w;
+    }
+
+    /// <summary>SC-SWING-TRAIL — while the actor's shown clip is in its swing
+    /// window, record the weapon's outer blade (from 30% of the way along its
+    /// longest axis to the tip; DS1 weapon meshes put the grip at the origin)
+    /// in world space.</summary>
+    private void RecordSwingTrail(ActorRenderState s, SiegeFX.Core.Assets.PrsAnimation clip, float clipTime,
+                                  StaticMesh weapon, Matrix4x4 weaponWorld)
+    {
+        if (!s.Actor.Host.IsOverrideActive) return;
+        var (wb, we) = SwingWindow(clip);
+        if (we <= wb || clipTime < wb || clipTime > we) return;
+        var min = weapon.Min; var max = weapon.Max;
+        var ext = max - min;
+        int axis = ext.X >= ext.Y && ext.X >= ext.Z ? 0 : ext.Y >= ext.Z ? 1 : 2;
+        float lo = axis == 0 ? min.X : axis == 1 ? min.Y : min.Z;
+        float hi = axis == 0 ? max.X : axis == 1 ? max.Y : max.Z;
+        float tipK = MathF.Abs(hi) >= MathF.Abs(lo) ? hi : lo;
+        var c = weapon.Center;
+        Vector3 At(float k) => axis == 0 ? new Vector3(k, c.Y, c.Z)
+                             : axis == 1 ? new Vector3(c.X, k, c.Z) : new Vector3(c.X, c.Y, k);
+        var inner = Vector3.Transform(At(tipK * 0.3f), weaponWorld);
+        var tip = Vector3.Transform(At(tipK), weaponWorld);
+        s.Trail ??= new List<SwingTrailRenderer.Sample>(16);
+        if (s.Trail.Count > 0 && s.Trail[^1].Time >= _playSeconds) return;
+        s.Trail.Add(new SwingTrailRenderer.Sample(inner, tip, _playSeconds));
+    }
+
+    /// <summary>SC-SWING-TRAIL — draw every actor's fading swing arc.</summary>
+    private void DrawSwingTrails(Matrix4x4 vp)
+    {
+        if (_gl is null) return;
+        bool any = false;
+        foreach (var s in _actors)
+        {
+            if (s.Trail is not { Count: > 0 } t) continue;
+            SwingTrailRenderer.Prune(t, _playSeconds);
+            if (t.Count > 1) any = true;
+        }
+        if (!any) return;
+        _swingTrails ??= new SwingTrailRenderer(_gl);
+        _swingTrails.Begin();
+        foreach (var s in _actors)
+            if (s.Trail is { Count: > 1 } t) _swingTrails.Add(t, _playSeconds);
+        _swingTrails.Draw(vp);
+    }
 
     /// <summary>The pose still fading out after the actor's last clip change.</summary>
     private static AnimationRuntime.PoseBlend ShownBlend(ActorRenderState s)
@@ -1865,6 +1926,9 @@ public sealed class RenderHost : IDisposable
         public SiegeFX.Core.Assets.PrsAnimation? BlendFrom;
         public float BlendFromTime;
         public float BlendElapsed = float.MaxValue;
+        // SC-SWING-TRAIL — recent blade samples while a swing is in its
+        // BSWG..ESWG window (see SwingTrailRenderer).
+        public List<SwingTrailRenderer.Sample>? Trail;
         public float BlendSeconds = ClipBlendSeconds;
 
         // Intro NIS gizmos — the narrator (a King-model voice-over actor) and the
@@ -24952,7 +25016,14 @@ void main()
                         s.BlendFrom = s.LastClip;
                         s.BlendFromTime = s.LastClipTime;
                         s.BlendElapsed = 0f;
-                        s.BlendSeconds = !isDead && s.Actor.Host.IsOverrideActive
+                        // The short fade is for the start of a strike only
+                        // (a clip with a FIRE note: a swing, a cast). The
+                        // between-swings guard pad is a chore too, and fading
+                        // into it in 0.08s snapped the follow-through back.
+                        var into = s.Actor.Clips.Length > 0
+                            ? s.Actor.Clips[Math.Min(idx, s.Actor.Clips.Length - 1)] : null;
+                        s.BlendSeconds = !isDead && s.Actor.Host.IsOverrideActive && into is not null
+                                && SiegeFX.Core.Actors.AnimNotes.Times(into, SiegeFX.Core.Actors.AnimNotes.Fire).Length > 0
                             ? ChoreBlendSeconds : ClipBlendSeconds;
                     }
                     // Phase 18 fix — restart the clock on slot-content swaps
@@ -39473,14 +39544,17 @@ void main()
                 int npcBones = s.Actor.Mesh.BoneCount;
                 if (_boneWorldsScratch.Length < npcBones)
                     _boneWorldsScratch = new Matrix4x4[Math.Max(npcBones, 64)];
+                SiegeFX.Core.Assets.PrsAnimation? npcClip = null;
+                float npcClipTime = 0f;
                 if (npcClips.Length == 0)
                 {
                     AnimationRuntime.ComputeAnimatedBoneWorlds(s.Actor.Mesh, null, 0f, _boneWorldsScratch);
                 }
                 else
                 {
-                    var npcClip = npcClips[ShownClipIndex(s)];
-                    AnimationRuntime.ComputeAnimatedBoneWorlds(s.Actor.Mesh, npcClip, ShownClipTime(s, npcClip),
+                    npcClip = npcClips[ShownClipIndex(s)];
+                    npcClipTime = ShownClipTime(s, npcClip);
+                    AnimationRuntime.ComputeAnimatedBoneWorlds(s.Actor.Mesh, npcClip, npcClipTime,
                         _boneWorldsScratch, ShownBlend(s));
                 }
                 float npcScale = s.Actor.Stats.RenderScale;
@@ -39509,6 +39583,10 @@ void main()
                     gearMesh.Draw();
                 }
                 if (!s.WeaponDroppedOnDeath) DrawGear(s.WeaponMesh, s.WeaponTexture, s.WeaponBoneIdx);
+                if (!s.IsDead && !s.WeaponDroppedOnDeath && npcClip is not null && s.WeaponMesh is not null
+                    && s.WeaponBoneIdx >= 0 && s.WeaponBoneIdx < npcBones)
+                    RecordSwingTrail(s, npcClip, npcClipTime, s.WeaponMesh,
+                        _boneWorldsScratch[s.WeaponBoneIdx] * actorModel);
                 DrawGear(s.ShieldMesh, s.ShieldTexture, s.ShieldBoneIdx);
                 // SC-TORCH-FLAME — a held torch burns: sparse small flame
                 // motes at the torch head (weapon bone + up). Built — needs
@@ -39690,6 +39768,11 @@ void main()
                     _meshShader.SetInt("uHasTexture", 0);
                 }
                 _weaponMesh.Draw();
+                if (!_weaponIsRanged && clips.Length > 0)
+                {
+                    var swingClip = clips[ShownClipIndex(_player)];
+                    RecordSwingTrail(_player, swingClip, ShownClipTime(_player, swingClip), _weaponMesh, weaponModel);
+                }
 
                 // SC-RANGED-PROJECTILE / SC-BOW-NOCK — the nocked arrow.
                 // DS1 keeps an arrow nocked the WHOLE time the bow is the
@@ -39773,6 +39856,8 @@ void main()
                 }
             }
         }
+
+        DrawSwingTrails(vp);
 
         // SC-POTION-DRINK-BOTTLE — while the raise gesture plays, the potion
         // bottle rides the hero's weapon hand, tinted by the potion type. Its
