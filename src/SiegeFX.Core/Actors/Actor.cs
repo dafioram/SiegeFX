@@ -132,8 +132,19 @@ public sealed class Actor
     {
         int idx = GetClipIndex(choreName);
         if (idx < 0) return;
+        ChoreTimeScale = 1f;
         Host.OverrideAnimIndex(idx, durationSec);
     }
+
+    /// <summary>SC-ATTACK-TIMING — playback rate of the pinned chore clip
+    /// (a swing sped up to fit its attack time, select_attack.skrit). Reset
+    /// to 1 by every <see cref="PlayChoreOnce"/>; the swing sets it after.</summary>
+    public float ChoreTimeScale { get; set; } = 1f;
+
+    /// <summary>SC-ATTACK-TIMING — the fade length the renderer uses for the
+    /// next clip change (the swing's fade-in, the fade into the fighting
+    /// fidget), then clears. Null = the renderer's own rule.</summary>
+    public float? NextBlendSeconds { get; set; }
 
     /// <summary>Phase 18 — every authored chore_attack sub-anim for the
     /// resolved stance EXCLUDING the trailing <c>qffg</c> entry (the

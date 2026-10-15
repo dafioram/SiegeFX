@@ -24956,7 +24956,9 @@ void main()
                         // into it in 0.08s snapped the follow-through back.
                         var into = s.Actor.Clips.Length > 0
                             ? s.Actor.Clips[Math.Min(idx, s.Actor.Clips.Length - 1)] : null;
-                        s.BlendSeconds = !isDead && s.Actor.Host.IsOverrideActive && into is not null
+                        s.BlendSeconds = s.Actor.NextBlendSeconds is { } nb && !isDead
+                            ? nb
+                            : !isDead && s.Actor.Host.IsOverrideActive && into is not null
                                 && SiegeFX.Core.Actors.AnimNotes.Times(into, SiegeFX.Core.Actors.AnimNotes.Fire).Length > 0
                             ? ChoreBlendSeconds : ClipBlendSeconds;
                     }
@@ -24967,6 +24969,7 @@ void main()
                     s.LastClipIndex = idx;
                     s.LastClipEpoch = s.Actor.ClipEpoch;
                     s.AnimTime = 0;
+                    s.Actor.NextBlendSeconds = null;
                 }
                 if (s.Actor.Clips.Length > 0)
                 {
@@ -24990,7 +24993,8 @@ void main()
                             // which reads as a glitchy "swinging-twice"
                             // visual.
                             float endHold = clip.AnimLength - 0.01f;
-                            if (s.AnimTime < endHold) s.AnimTime = Math.Min(s.AnimTime + dt, endHold);
+                            if (s.AnimTime < endHold)
+                                s.AnimTime = Math.Min(s.AnimTime + dt * s.Actor.ChoreTimeScale, endHold);
                         }
                         else
                         {
@@ -34890,7 +34894,12 @@ void main()
             Prop = prop,
             Attacker = attacker,
         };
-        _player.Actor.PlayChoreOnce("chore_attack", clipLen);
+        // SC-ATTACK-TIMING — select_attack.skrit's timing: the clip plays at
+        // the schedule's rate (sped up when it's longer than the attack
+        // time) after a fade of min(0.10s, a quarter of the clip).
+        _player.Actor.PlayChoreOnce("chore_attack", _playerSwing.Sched.PlayLength);
+        _player.Actor.ChoreTimeScale = _playerSwing.Sched.TimeScale;
+        _player.Actor.NextBlendSeconds = _playerSwing.Sched.FadeIn;
     }
 
     /// <summary>Phase 18c — advance the player's swing clock: whoosh at BSWG,
@@ -34905,8 +34914,11 @@ void main()
         // silent until the release twang below.
         if (whoosh && !_weaponIsRanged) _audio?.Play(SfxMeleeSwingGroup);
         if (pad && _player.Actor.SwapToPadClip())
+        {
             _player.Actor.PlayChoreOnce("chore_attack",
                 MathF.Max(0.1f, ps.Sched.Period - ps.Sched.Elapsed));
+            _player.Actor.NextBlendSeconds = ps.Sched.PadFade;
+        }
         for (int i = 0; i < fires; i++)
         {
             // SC-RANGED-PROJECTILE — a projectile weapon looses an ammo GO at

@@ -384,7 +384,9 @@ public sealed class ActorBrain
         _activeSwing = new SwingSchedule(clip, baseDur + MathF.Max(0f, _selfStats.ReloadDelay));
         _activeSwingRanged = ranged;
         _activeSwingIsCast = false;
-        _selfActor.PlayChoreOnce("chore_attack", clipLen);
+        _selfActor.PlayChoreOnce("chore_attack", _activeSwing.PlayLength);
+        _selfActor.ChoreTimeScale = _activeSwing.TimeScale;
+        _selfActor.NextBlendSeconds = _activeSwing.FadeIn;
         JustSwung = true;
     }
 
@@ -402,6 +404,7 @@ public sealed class ActorBrain
             {
                 _selfActor!.PlayChoreOnce(_activeSwingIsCast ? "chore_magic" : "chore_attack",
                     MathF.Max(0.1f, sw.Period - sw.Elapsed));
+                _selfActor.NextBlendSeconds = sw.PadFade;
             }
         }
         for (; fires > 0; fires--)
