@@ -2253,34 +2253,20 @@ public sealed class ParticleSystem : IParticleSink, IDisposable
             var head = r.Position;
             var tail = head - dir * streakLen;
             var toCam = cameraPos - head;
-            // The drop column is centred on the hero and the camera sits
-            // inside it, so a few drops fall past the lens and drew as big
-            // white bars across the screen ("an arrow at the screen"). Drops
-            // fade out from RainNearFade to RainNearCull meters of the camera.
-            float camDist = toCam.Length();
-            if (camDist < RainNearCull) continue;
-            float near = Math.Clamp((camDist - RainNearCull) / (RainNearFade - RainNearCull), 0f, 1f);
-            var hc = cHead with { W = cHead.W * near };
-            var tc = cTail with { W = cTail.W * near };
             var perp = Vector3.Cross(dir, toCam);
             if (perp.LengthSquared() < 0.0001f) perp = Vector3.UnitX;
             perp = Vector3.Normalize(perp) * halfWidth;
 
             var hL = head + perp; var hR = head - perp;
             var tL = tail + perp; var tR = tail - perp;
-            EmitRibbonVert(hL, 0f, 0f, hc);
-            EmitRibbonVert(hR, 1f, 0f, hc);
-            EmitRibbonVert(tL, 0f, 1f, tc);
-            EmitRibbonVert(hR, 1f, 0f, hc);
-            EmitRibbonVert(tR, 1f, 1f, tc);
-            EmitRibbonVert(tL, 0f, 1f, tc);
+            EmitRibbonVert(hL, 0f, 0f, cHead);
+            EmitRibbonVert(hR, 1f, 0f, cHead);
+            EmitRibbonVert(tL, 0f, 1f, cTail);
+            EmitRibbonVert(hR, 1f, 0f, cHead);
+            EmitRibbonVert(tR, 1f, 1f, cTail);
+            EmitRibbonVert(tL, 0f, 1f, cTail);
         }
     }
-
-    /// <summary>Rain closer to the camera than this is not drawn.</summary>
-    const float RainNearCull = 1.5f;
-    /// <summary>Rain fades in from <see cref="RainNearCull"/> to this distance.</summary>
-    const float RainNearFade = 4f;
 
     /// <summary>Phase 23d-2b — SU-212 profile animation: (start, end,
     /// increment). increment != 0 steps toward end (clamped, or unbounded
