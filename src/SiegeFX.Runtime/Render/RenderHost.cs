@@ -1909,6 +1909,11 @@ public sealed class RenderHost : IDisposable
     /// walk in one frame).</summary>
     private const float ClipBlendSeconds = 0.2f;
 
+    /// <summary>The crossfade into a pinned chore (a swing, a cast): short,
+    /// so the fade doesn't eat the wind-up and the swing shows its full arc.
+    /// Leaving the chore back to idle or walk keeps the longer fade.</summary>
+    private const float ChoreBlendSeconds = 0.08f;
+
     /// <summary>The clip slot an actor shows: its walk cycle while it moves,
     /// unless a chore override (swing, cast, death, scripted pose) is pinned;
     /// its current clip otherwise. -1 with no clips. The animation clock, the
@@ -1933,8 +1938,8 @@ public sealed class RenderHost : IDisposable
     /// <summary>The pose still fading out after the actor's last clip change.</summary>
     private static AnimationRuntime.PoseBlend ShownBlend(ActorRenderState s)
     {
-        if (s.BlendFrom is null || s.BlendElapsed >= ClipBlendSeconds) return default;
-        float k = Math.Clamp(s.BlendElapsed / ClipBlendSeconds, 0f, 1f);
+        if (s.BlendFrom is null || s.BlendElapsed >= s.BlendSeconds) return default;
+        float k = Math.Clamp(s.BlendElapsed / s.BlendSeconds, 0f, 1f);
         k = k * k * (3f - 2f * k);   // ease in and out
         return new AnimationRuntime.PoseBlend(s.BlendFrom, s.BlendFromTime, 1f - k);
     }
@@ -1956,6 +1961,7 @@ public sealed class RenderHost : IDisposable
         public SiegeFX.Core.Assets.PrsAnimation? BlendFrom;
         public float BlendFromTime;
         public float BlendElapsed = float.MaxValue;
+        public float BlendSeconds = ClipBlendSeconds;
 
         // Intro NIS gizmos — the narrator (a King-model voice-over actor) and the
         // sleeping dog (a one-shot "look at the camera" prop) are spawned so the
@@ -25248,6 +25254,8 @@ void main()
                         s.BlendFrom = s.LastClip;
                         s.BlendFromTime = s.LastClipTime;
                         s.BlendElapsed = 0f;
+                        s.BlendSeconds = !isDead && s.Actor.Host.IsOverrideActive
+                            ? ChoreBlendSeconds : ClipBlendSeconds;
                     }
                     // Phase 18 fix — restart the clock on slot-content swaps
                     // too (PickNextSwingClip / SwapToPadClip reuse the same
@@ -25289,7 +25297,7 @@ void main()
                     s.LastClip = clip;
                     s.LastClipTime = ShownClipTime(s, clip);
                 }
-                if (s.BlendElapsed < ClipBlendSeconds) s.BlendElapsed += (float)dt;
+                if (s.BlendElapsed < s.BlendSeconds) s.BlendElapsed += (float)dt;
             }
         }
 
