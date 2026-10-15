@@ -118,6 +118,8 @@ static class SaveCommands
         var alive = r.Matches.Where(p => saved.Contains(p.Scid) && !retired.Contains(p.Scid)).ToList();
         var gone = r.Matches.Where(p => retired.Contains(p.Scid)).ToList();
         var never = r.Matches.Where(p => !saved.Contains(p.Scid) && !retired.Contains(p.Scid)).ToList();
+        var blocks = MapPlacements.Blocks(new SiegeFX.Core.Tank.TankReader(tank), s.Info.MapName,
+                                          never.Select(p => p.Scid).ToHashSet());
         Console.WriteLine($"{loaded.Count} loaded node(s); {r.Matches.Count} placement(s) on them" +
                           (templateFilter is null ? "" : $" matching '{templateFilter}'") +
                           $": {alive.Count} in the world, {gone.Count} retired, {never.Count} never created");
@@ -127,7 +129,7 @@ static class SaveCommands
             foreach (var p in list.OrderBy(p => p.Template, StringComparer.Ordinal).ThenBy(p => p.Scid))
             {
                 Console.WriteLine($"  0x{p.Scid:x8}  {p.Template,-28} {p.Region}/{p.File}");
-                if (block && p.Block is not null) Console.WriteLine("      " + Flatten(p.Block));
+                if (block && blocks.TryGetValue(p.Scid, out var b)) Console.WriteLine("      " + Flatten(b));
             }
         }
         List("in the world", alive, false);

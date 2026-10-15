@@ -6,9 +6,8 @@ namespace SiegeFX.OriginalSaves;
 
 /// <summary>A placement in a map: which region and objects file holds it,
 /// its <c>[t:template,n:scid]</c> header, and the terrain node its
-/// <c>[placement] position</c> is anchored to, and its whole instance block.</summary>
-public sealed record MapPlacement(string Region, string File, string Template, uint Scid, uint? Node = null,
-                                 GasNode? Block = null)
+/// <c>[placement] position</c> is anchored to.</summary>
+public sealed record MapPlacement(string Region, string File, string Template, uint Scid, uint? Node = null)
 {
     /// <summary>The folder between <c>objects/</c> and the file, when there
     /// is one. LoA's map places each object once per difficulty world, under
@@ -47,7 +46,17 @@ public static class MapPlacements
                         && (templateFilter is null || p.Template.Contains(templateFilter, StringComparison.OrdinalIgnoreCase)),
               mapName);
 
-    static SearchResult Where(TankReader map, Func<MapPlacement, bool> match, string? mapName = null)
+    /// <summary>The instance blocks (the whole <c>[t:…,n:…]</c> node) of
+    /// map <paramref name="mapName"/>'s placements with these SCIDs.</summary>
+    public static IReadOnlyDictionary<uint, GasNode> Blocks(TankReader map, string mapName, IReadOnlySet<uint> scids)
+    {
+        var blocks = new Dictionary<uint, GasNode>();
+        Where(map, p => scids.Contains(p.Scid), mapName, blocks);
+        return blocks;
+    }
+
+    static SearchResult Where(TankReader map, Func<MapPlacement, bool> match, string? mapName = null,
+                              Dictionary<uint, GasNode>? blocks = null)
     {
         var mapDir = mapName is null ? null : $"/maps/{mapName}/";
         var matches = new List<MapPlacement>();
@@ -70,8 +79,10 @@ public static class MapPlacements
             {
                 if (!TemplateStore.TryParseHeader(node.Header, out var tpl, out var n)) continue;
                 if (TryParseHex(n) is not uint id) continue;
-                var p = new MapPlacement(region, path[(o + "/objects/".Length)..], tpl, id, PlacementNode(node), node);
-                if (match(p)) matches.Add(p);
+                var p = new MapPlacement(region, path[(o + "/objects/".Length)..], tpl, id, PlacementNode(node));
+                if (!match(p)) continue;
+                matches.Add(p);
+                blocks?.TryAdd(p.Scid, node);
             }
         }
         return new SearchResult(matches, files, regions.Count, errors);
