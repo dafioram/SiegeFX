@@ -131,6 +131,7 @@ static void PrintUsage()
     Console.WriteLine("  siegefx region path-fuzz   <map-tank> <terrain-tank>");
     Console.WriteLine("  siegefx region nav-components <map-tank> <terrain-tank> <region-path|all> [--top=N]");
     Console.WriteLine("  siegefx region follow      <map-tank> <terrain-tank> <region-path> <x1,y1,z1> <x2,y2,z2> [speed] [ticks]");
+    Console.WriteLine("  siegefx region hero-sim    <map-tank> <terrain-tank> <regions> [--clicks=150] [--range=10] [--seed=1] [--near=x,z,r] [--diag]");
     Console.WriteLine("  siegefx formulas dump      <Logic.dsres>");
     Console.WriteLine("  siegefx spells dump        <Logic.dsres>");
     Console.WriteLine("  siegefx spells show        <Logic.dsres> <spell_name> [magic_level]");
@@ -825,6 +826,7 @@ static int DispatchRegion(string[] a)
         "logic-gizmos" => CmdRegionLogicGizmos(a[1..]),
         "roam-sim"    => CmdRegionRoamSim(a[1..]),
         "chase-sim"   => CmdRegionChaseSim(a[1..]),
+        "hero-sim"    => CmdRegionHeroSim(a[1..]),
         _             => UnknownCommand("region " + a[0]),
     };
 }
@@ -3065,7 +3067,7 @@ static int CmdWorldPath(string[] a)
 /// siblings of the map tank; missing tanks = unmarked mesh + a loud note.
 /// MIRROR of RenderHost.MarkAllObstacles — keep the two in step.</summary>
 static int MarkRoamSimObstacles(SiegeFX.Core.Nav.NavMesh mesh, string mapTankPath,
-    string regionsArg, Dictionary<uint, Matrix4x4> nodeWorld)
+    string regionsArg, Dictionary<uint, Matrix4x4> nodeWorld, ICollection<string>? broken = null)
 {
     string? root = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(mapTankPath)));
     string logicPath = root is null ? "" : Path.Combine(root, "Resources", "Logic.dsres");
@@ -3101,6 +3103,11 @@ static int MarkRoamSimObstacles(SiegeFX.Core.Nav.NavMesh mesh, string mapTankPat
             {
                 if (!nodeWorld.TryGetValue(p.Placement.NodeGuid, out var nw)) continue;
                 if (!store.TryGet(p.TemplateName, out var tpl) || tpl is null) continue;
+                // Props the player broke in the session being replayed are
+                // gone in-game, so they block nothing (by scid or template).
+                string tag = $"{p.TemplateName} 0x{p.Scid:X8}";
+                if (broken is not null && (broken.Contains($"0x{p.Scid:X8}") || broken.Contains(p.TemplateName)))
+                    continue;
                 bool isDoor = false;
                 for (var t = tpl; t is not null; t = t.Specializes)
                     if (string.Equals(t.Name, "base_door", StringComparison.OrdinalIgnoreCase))
@@ -3179,7 +3186,7 @@ static int MarkRoamSimObstacles(SiegeFX.Core.Nav.NavMesh mesh, string mapTankPat
                     {
                         float along = -halfLong + longLen * (di / (float)(n - 1));
                         var c = origin + axis * along;
-                        marked += mesh.MarkObstacle(c.X, c.Z, discR, propBaseY, propTopY);
+                        marked += mesh.MarkObstacle(c.X, c.Z, discR, propBaseY, propTopY, tag);
                     }
                 }
                 else if (shortLen > 2.4f)
@@ -3196,12 +3203,16 @@ static int MarkRoamSimObstacles(SiegeFX.Core.Nav.NavMesh mesh, string mapTankPat
                     {
                         var c = wcA + axU * (sideAB * iu / (nu - 1))
                                     + axV * (sideAD * iv / (nv - 1));
-                        marked += mesh.MarkObstacle(c.X, c.Z, gridR, propBaseY, propTopY);
+                        marked += mesh.MarkObstacle(c.X, c.Z, gridR, propBaseY, propTopY, tag);
                     }
                 }
                 else
                 {
-                    marked = mesh.MarkObstacle(origin.X, origin.Z, radius, propBaseY, propTopY);
+                    var axU = Vector3.Normalize(new Vector3(wcB.X - wcA.X, 0f, wcB.Z - wcA.Z));
+                    var axV = Vector3.Normalize(new Vector3(wcD.X - wcA.X, 0f, wcD.Z - wcA.Z));
+                    marked = sideAB > 0.05f && sideAD > 0.05f
+                        ? mesh.MarkObstacleRect(wcA, axU, sideAB, axV, sideAD, propBaseY, propTopY, tag)
+                        : mesh.MarkObstacle(origin.X, origin.Z, radius, propBaseY, propTopY, tag);
                 }
                 if (marked > 0) { props++; discs += marked; }
             }
@@ -3670,6 +3681,242 @@ static int CmdRegionChaseSim(string[] a)
         }
     }
     return failures.Count == 0 ? 0 : 3;
+}
+
+/// <summary>`region hero-sim` — headless audit of the HERO's movement, the
+/// half chase-sim and roam-sim don't cover. Two passes from random standing
+/// points, with the hero's own follower settings (Player traversal, partial-
+/// path fallback):
+///   clicks   — a ground click 5-40u away. OK / PARTIAL (walked to the
+///              nearest reachable point) / BLOCKED (refused at the click) /
+///              STUCK (gave up mid-walk) / PINNED (time ran out). Also counts
+///              wrong-way starts (the first meter heads away from the click)
+///              and long detours (walked more than 2.5x the straight line).
+///   approach — an attack order on a target 5-40u away with --range (a bow),
+///              driven tick by tick through the game's HeroApproach rules:
+///              path to the target, stop the tick it is in reach.
+///              IN-REACH / GAVE-UP (no path) / PINNED. The line test is the
+///              nav mesh's blocked-prop test; the game's sight test also
+///              casts against terrain, which this tool does not load.
+/// Clicks are placed on the nav mesh by XZ; the game's mouse ray is not
+/// simulated. STUCK and PINNED are failures (exit 3).</summary>
+static int CmdRegionHeroSim(string[] a)
+{
+    if (a.Length < 3)
+    {
+        Console.Error.WriteLine("usage: siegefx region hero-sim <map-tank> <terrain-tank> <region1,region2,...> [--clicks=150] [--range=10] [--speed=4.5] [--seed=1] [--near=x,z,r] [--diag] [--from=x,y,z --to=x,y,z] [--broken=<template|0xscid>,...]");
+        Console.Error.WriteLine("       walks the hero to random clicks and up to random targets; reports failures and their start/goal to replay");
+        Console.Error.WriteLine("       --from/--to replays one click walk (coordinates as the game log prints them) with the follower's diagnostics on");
+        Console.Error.WriteLine("       --broken leaves out props broken in the session being replayed (they block nothing in-game)");
+        return 1;
+    }
+    int clicks = 150, seed = 1;
+    float range = 10f, speed = 4.5f;
+    bool diag = false;
+    Vector3 nearCenter = default;
+    float nearRadius = 0f;
+    Vector3? replayFrom = null, replayTo = null;
+    var broken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    static bool TryF(string s, out float v) =>
+        float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v);
+    for (int i = 3; i < a.Length; i++)
+    {
+        if (a[i] == "--diag") diag = true;
+        else if (a[i].StartsWith("--from=") && TryParseVec3(a[i]["--from=".Length..], out var fv)) replayFrom = fv;
+        else if (a[i].StartsWith("--to=") && TryParseVec3(a[i]["--to=".Length..], out var tv)) replayTo = tv;
+        else if (a[i].StartsWith("--broken="))
+            foreach (var b in a[i]["--broken=".Length..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                broken.Add(b.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? "0x" + b[2..].ToUpperInvariant() : b);
+        else if (a[i].StartsWith("--clicks=") && int.TryParse(a[i]["--clicks=".Length..], out var cv)) clicks = Math.Clamp(cv, 1, 5000);
+        else if (a[i].StartsWith("--range=") && TryF(a[i]["--range=".Length..], out var rv)) range = rv;
+        else if (a[i].StartsWith("--speed=") && TryF(a[i]["--speed=".Length..], out var sv)) speed = sv;
+        else if (a[i].StartsWith("--seed=") && int.TryParse(a[i]["--seed=".Length..], out var kv)) seed = kv;
+        else if (a[i].StartsWith("--near="))
+        {
+            var p = a[i]["--near=".Length..].Split(',');
+            if (p.Length == 3 && TryF(p[0], out var nx) && TryF(p[1], out var nz) && TryF(p[2], out var nr))
+            { nearCenter = new Vector3(nx, 0f, nz); nearRadius = nr; }
+        }
+    }
+
+    var mesh = LoadWorldNavMesh(a[0], a[1], a[2]);
+    Console.WriteLine($"NavMesh    : {mesh.TriangleCount:N0} tris, {mesh.DoorSeamCount} door seam(s)");
+    var nodeWorld = new Dictionary<uint, Matrix4x4>();
+    foreach (var (guid, _, _, w) in LoadWorldNodePlacements(a[0], a[1], a[2]))
+        nodeWorld[guid] = w;
+    MarkRoamSimObstacles(mesh, a[0], a[2], nodeWorld, broken);
+
+    var traversal = NavTraversal.Player;
+    var rng = new Random(seed);
+    var ws = new NavPathfinder.Workspace();
+    var buf = new List<int>(256);
+    const float dt = 1f / 20f;
+
+    // A standing point the hero could occupy: a passable, unblocked tri the
+    // pathfinder accepts as both start and goal.
+    bool TryStart(out Vector3 pos, out int tri)
+    {
+        for (int tries = 0; tries < 2000; tries++)
+        {
+            int t = rng.Next(mesh.TriangleCount);
+            var c = mesh.Centroids[t];
+            if (nearRadius > 0f)
+            {
+                float ndx = c.X - nearCenter.X, ndz = c.Z - nearCenter.Z;
+                if (ndx * ndx + ndz * ndz > nearRadius * nearRadius) continue;
+            }
+            if (mesh.IsBlocked(t) || !traversal.CanEnter(mesh.Kinds[t])) continue;
+            if (!NavPathfinder.TryFindPath(mesh, t, t, buf, ws, traversal)) continue;
+            pos = c; tri = t;
+            return true;
+        }
+        pos = default; tri = -1;
+        return false;
+    }
+
+    // A point on the mesh 5-40u from the start, on the start's layer stack.
+    bool TryAround(Vector3 start, out Vector3 point, out int tri)
+    {
+        for (int tries = 0; tries < 40; tries++)
+        {
+            float ang = (float)(rng.NextDouble() * Math.PI * 2.0);
+            float dist = 5f + (float)rng.NextDouble() * 35f;
+            var q = new Vector3(start.X + MathF.Cos(ang) * dist, start.Y, start.Z + MathF.Sin(ang) * dist);
+            if (!mesh.TryFindTriangle(q, out tri, includeFadeHidden: true)) continue;
+            float y = mesh.SampleYOnTriangle(tri, q);
+            if (MathF.Abs(y - start.Y) > 6f) continue;
+            point = new Vector3(q.X, y, q.Z);
+            return true;
+        }
+        point = default; tri = -1;
+        return false;
+    }
+
+    NavFollower NewHero(Vector3 pos) =>
+        new(mesh, pos, speed) { Traversal = traversal, PartialPathFallback = true, DiagnosticLogging = diag };
+
+    static float DistXZ(Vector3 p, Vector3 q) => MathF.Sqrt((p.X - q.X) * (p.X - q.X) + (p.Z - q.Z) * (p.Z - q.Z));
+
+    // ── Replay: one click walk from the game log ──────────────────────
+    if (replayFrom is { } from && replayTo is { } to)
+    {
+        var hero = new NavFollower(mesh, from, speed)
+            { Traversal = traversal, PartialPathFallback = true, DiagnosticLogging = true };
+        hero.SetTarget(to);
+        Console.WriteLine($"Replay     : {FormatVec(hero.Position)} tri={hero.CurrentTriangle} -> {FormatVec(to)}" +
+                          $"  path={hero.RemainingPath.Count}tri waypoints={hero.Waypoints.Count} blocked={hero.PathBlocked}");
+        for (int w = 0; w < hero.Waypoints.Count; w++)
+            Console.WriteLine($"  wp[{w,2}] {FormatVec(hero.Waypoints[w])}");
+        string outcome = hero.PathBlocked ? "BLOCKED" : "PINNED";
+        float budget = DistXZ(from, to) / MathF.Max(1f, speed) * 4f + 10f, walked = 0f;
+        int lastTri = hero.CurrentTriangle;
+        for (float t = 0f; t < budget && !hero.PathBlocked; t += dt)
+        {
+            var before = hero.Position;
+            hero.Tick(dt);
+            walked += DistXZ(before, hero.Position);
+            if (hero.CurrentTriangle != lastTri)
+            {
+                Console.WriteLine($"  t={t,5:F2}  {FormatVec(hero.Position)} tri={hero.CurrentTriangle}");
+                lastTri = hero.CurrentTriangle;
+            }
+            if (hero.ReachedGoal) { outcome = DistXZ(hero.Position, to) <= 1.5f ? "OK" : "PARTIAL"; break; }
+            if (hero.PathBlocked) outcome = "STUCK";
+        }
+        Console.WriteLine($"Outcome    : {outcome} at {FormatVec(hero.Position)} tri={hero.CurrentTriangle}, walked {walked:F1}u");
+        return outcome == "OK" ? 0 : 3;
+    }
+
+    // ── Pass 1: clicks ────────────────────────────────────────────────
+    var clickOutcomes = new Dictionary<string, int>();
+    var clickFails = new List<string>();
+    int wrongWay = 0, detours = 0, clicksRun = 0;
+    for (int n = 0; n < clicks; n++)
+    {
+        if (!TryStart(out var start, out var startTri)) break;
+        if (!TryAround(start, out var click, out var clickTri)) continue;
+        clicksRun++;
+        buf.Clear();
+        bool reachable = NavPathfinder.TryFindPath(mesh, startTri, clickTri, buf, ws, traversal);
+        var hero = NewHero(start);
+        hero.SetTarget(click);
+        string outcome;
+        float walked = 0f, straight = DistXZ(start, click);
+        bool headingChecked = false;
+        if (hero.PathBlocked) outcome = "BLOCKED";
+        else
+        {
+            outcome = "PINNED";
+            float budget = straight / MathF.Max(1f, speed) * 4f + 10f;
+            for (float t = 0f; t < budget; t += dt)
+            {
+                var before = hero.Position;
+                hero.Tick(dt);
+                walked += DistXZ(before, hero.Position);
+                if (!headingChecked && DistXZ(start, hero.Position) >= 1f)
+                {
+                    headingChecked = true;
+                    var moved = new Vector2(hero.Position.X - start.X, hero.Position.Z - start.Z);
+                    var want = new Vector2(click.X - start.X, click.Z - start.Z);
+                    if (Vector2.Dot(Vector2.Normalize(moved), Vector2.Normalize(want)) < 0f) wrongWay++;
+                }
+                if (hero.ReachedGoal) { outcome = DistXZ(hero.Position, click) <= 1.5f ? "OK" : "PARTIAL"; break; }
+                if (hero.PathBlocked) { outcome = "STUCK"; break; }
+            }
+            if (outcome == "OK" && walked > 2.5f * straight + 2f) detours++;
+        }
+        clickOutcomes[outcome] = clickOutcomes.GetValueOrDefault(outcome) + 1;
+        if (outcome is "STUCK" or "PINNED" || (outcome == "BLOCKED" && reachable))
+            clickFails.Add($"{outcome,-8} start={FormatVec(start)} click={FormatVec(click)} walked={walked:F1}/{straight:F1}u A*={(reachable ? "reachable" : "no")}");
+    }
+
+    // ── Pass 2: walk up to a target with a ranged weapon ──────────────
+    var approachOutcomes = new Dictionary<string, int>();
+    var approachFails = new List<string>();
+    int beyondOldCap = 0, approachesRun = 0, gaveUpReachable = 0;
+    for (int n = 0; n < clicks; n++)
+    {
+        if (!TryStart(out var start, out var startTri)) break;
+        if (!TryAround(start, out var target, out var targetTri)) continue;
+        approachesRun++;
+        float initial = DistXZ(start, target);
+        if (initial > 14f) beyondOldCap++;
+        buf.Clear();
+        bool reachable = NavPathfinder.TryFindPath(mesh, startTri, targetTri, buf, ws, traversal);
+        var hero = NewHero(start);
+        hero.SetTarget(target);
+        string outcome = "PINNED";
+        float budget = initial / MathF.Max(1f, speed) * 4f + 10f;
+        for (float t = 0f; t < budget; t += dt)
+        {
+            var pos = hero.Position;
+            float d = DistXZ(pos, target);
+            bool lineBlocked = d <= range && mesh.SegmentCrossesBlocked(pos, target);
+            var step = HeroApproach.Decide(d, range, lineBlocked, hero.PathBlocked);
+            if (step == HeroApproachStep.Act) { outcome = "IN-REACH"; break; }
+            if (step == HeroApproachStep.GiveUp) { outcome = "GAVE-UP"; break; }
+            hero.SetTarget(target);   // as the game does: path to the target, stop when in reach
+            hero.Tick(dt);
+        }
+        approachOutcomes[outcome] = approachOutcomes.GetValueOrDefault(outcome) + 1;
+        if (outcome == "GAVE-UP" && reachable) gaveUpReachable++;
+        if (outcome == "PINNED" || (outcome == "GAVE-UP" && reachable))
+            approachFails.Add($"{outcome,-8} start={FormatVec(start)} target={FormatVec(target)} end={FormatVec(hero.Position)} A*={(reachable ? "reachable" : "no")}");
+    }
+
+    static string Tally(Dictionary<string, int> d, params string[] order) =>
+        string.Join(", ", order.Select(k => $"{d.GetValueOrDefault(k)} {k}"));
+    Console.WriteLine($"Clicks     : {clicksRun} run — {Tally(clickOutcomes, "OK", "PARTIAL", "BLOCKED", "STUCK", "PINNED")}");
+    Console.WriteLine($"             {wrongWay} wrong-way start(s), {detours} detour(s) over 2.5x the straight line");
+    Console.WriteLine($"Approach   : {approachesRun} run at range {range:F1}u — {Tally(approachOutcomes, "IN-REACH", "GAVE-UP", "PINNED")}");
+    Console.WriteLine($"             {gaveUpReachable} gave up on an A*-reachable target; {beyondOldCap} started beyond 14u (dropped at once before this fix)");
+    foreach (var f in clickFails.Take(12)) Console.WriteLine($"  click    {f}");
+    if (clickFails.Count > 12) Console.WriteLine($"  ... {clickFails.Count - 12} more click failure(s)");
+    foreach (var f in approachFails.Take(12)) Console.WriteLine($"  approach {f}");
+    if (approachFails.Count > 12) Console.WriteLine($"  ... {approachFails.Count - 12} more approach failure(s)");
+    int hard = clickOutcomes.GetValueOrDefault("STUCK") + clickOutcomes.GetValueOrDefault("PINNED")
+             + approachOutcomes.GetValueOrDefault("PINNED");
+    return hard == 0 ? 0 : 3;
 }
 
 /// <summary>`world probe` — list EVERY nav triangle whose XZ footprint contains the

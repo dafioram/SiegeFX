@@ -206,6 +206,21 @@ public sealed class NavMesh
     /// prop's world top so a floor tri right at the top edge still counts.</summary>
     private const float ObstacleAboveTopTol = 0.5f;
 
+    /// <summary>How far above its base a prop blocks: the ground it stands on,
+    /// with room for slope under the footprint. Up to its top (+0.5) the old
+    /// band let a 1.4u cart beside a farmhouse block the house floor and
+    /// stair raised a metre above it on the far side of the wall.</summary>
+    private const float ObstacleAboveBaseTol = 0.9f;
+
+    /// <summary>Top of the vertical band a rectangle obstacle blocks: 0.9u
+    /// above its base, and never above its own top (+0.5). Disc obstacles
+    /// (long fences, big wagons) keep the top-based band: their single
+    /// centre base would leave a hillside fence's uphill end unblocked.</summary>
+    private static float ObstacleBandTop(float baseY, float topY) =>
+        float.IsFinite(baseY)
+            ? MathF.Min(topY + ObstacleAboveTopTol, baseY + ObstacleAboveBaseTol)
+            : topY + ObstacleAboveTopTol;
+
     /// <summary>SC-NAV-OBSTACLE-YGATE — Y-aware obstacle marking. Same XZ
     /// footprint test as the 3-arg overload, but a triangle is only blocked
     /// when its centroid Y falls within
@@ -287,6 +302,109 @@ public sealed class NavMesh
         }
         return marked;
     }
+
+    /// <summary>SC-NAV-OBSTACLE-RECT — block a prop's own oriented footprint
+    /// rectangle instead of the disc around it. The rectangle starts at
+    /// <paramref name="corner"/> and spans <paramref name="lenU"/> along
+    /// <paramref name="axisU"/> and <paramref name="lenV"/> along
+    /// <paramref name="axisV"/> (unit XZ axes, at right angles), grown by
+    /// <see cref="ObstacleRectMargin"/> on every side. Same rules as the disc
+    /// overload otherwise: the vertical band gate, centroid containment for
+    /// any triangle, an edge crossing only for small ones. A bed's bounding
+    /// disc reached a third of a meter past its foot onto the stair top
+    /// beside it and sealed a farmhouse's upper floor. The margin applies
+    /// to centroid containment only; an edge crossing seals a small
+    /// triangle only when <see cref="ObstacleRectEdgeDepth"/> of the edge
+    /// lies inside the exact footprint.</summary>
+    public int MarkObstacleRect(Vector3 corner, Vector3 axisU, float lenU, Vector3 axisV, float lenV,
+                                float baseY, float topY, string? tag)
+    {
+        Blocked ??= new bool[TriangleCount];
+        BlockedTag ??= new string?[TriangleCount];
+        if (lenU <= 0f || lenV <= 0f) return 0;
+        float m = ObstacleRectMargin;
+        float u0 = -m, u1 = lenU + m, v0 = -m, v1 = lenV + m;
+        float loY = baseY - ObstacleBelowFloorTol;
+        float hiY = ObstacleBandTop(baseY, topY);
+        // Local footprint coordinates of a world point.
+        (float U, float V) Local(Vector3 p)
+        {
+            float dx = p.X - corner.X, dz = p.Z - corner.Z;
+            return (dx * axisU.X + dz * axisU.Z, dx * axisV.X + dz * axisV.Z);
+        }
+        bool Inside((float U, float V) q) => q.U >= u0 && q.U <= u1 && q.V >= v0 && q.V <= v1;
+        // Liang-Barsky: does the segment p->q cross the rectangle?
+        // The edge test uses the exact footprint and needs a real crossing:
+        // at least ObstacleRectEdgeDepth of the edge inside it. The margin
+        // is for bodies standing on a tile, and slivers merely grazing a
+        // bed's or cart's corner at a farmhouse stair foot (the stair's only
+        // link to the floor) sealed the stair.
+        float InsideLength((float U, float V) p, (float U, float V) q)
+        {
+            const float u0 = 0f, v0 = 0f;
+            float u1 = lenU, v1 = lenV;
+            float t0 = 0f, t1 = 1f, du = q.U - p.U, dv = q.V - p.V;
+            bool Clip(float den, float num)
+            {
+                if (MathF.Abs(den) < 1e-9f) return num >= 0f;
+                float r = num / den;
+                if (den < 0f) { if (r > t1) return false; if (r > t0) t0 = r; }
+                else { if (r < t0) return false; if (r < t1) t1 = r; }
+                return true;
+            }
+            if (!(Clip(-du, p.U - u0) && Clip(du, u1 - p.U) && Clip(-dv, p.V - v0) && Clip(dv, v1 - p.V)))
+                return 0f;
+            return MathF.Max(0f, t1 - t0) * MathF.Sqrt(du * du + dv * dv);
+        }
+        string size = $"{lenU:F2}x{lenV:F2}";
+        int marked = 0;
+        for (int t = 0; t < TriangleCount; t++)
+        {
+            if (Blocked[t]) continue;
+            float cy = Centroids[t].Y;
+            if (cy < loY || cy > hiY) continue;
+            if (Inside(Local(Centroids[t])))
+            {
+                Blocked[t] = true;
+                BlockedTag[t] = $"{tag}|rect {size} centroid";
+                marked++;
+                continue;
+            }
+            var a = Vertices[Indices[3 * t + 0]];
+            var b = Vertices[Indices[3 * t + 1]];
+            var c = Vertices[Indices[3 * t + 2]];
+            var la = Local(a); var lb = Local(b); var lc = Local(c);
+            float depth = MathF.Max(InsideLength(la, lb), MathF.Max(InsideLength(lb, lc), InsideLength(lc, la)));
+            if (depth < ObstacleRectEdgeDepth) continue;
+            // ...and only a triangle that lies mostly in it: its centre within
+            // ObstacleRectEdgeReach of the footprint. A sliver merely clipping
+            // a corner (the farmhouse stair foot) stays walkable.
+            var cc = Local(Centroids[t]);
+            float ou = MathF.Max(0f, MathF.Max(-cc.U, cc.U - lenU));
+            float ov = MathF.Max(0f, MathF.Max(-cc.V, cc.V - lenV));
+            if (ou * ou + ov * ov > ObstacleRectEdgeReach * ObstacleRectEdgeReach) continue;
+            float abx = b.X - a.X, abz = b.Z - a.Z;
+            float acx = c.X - a.X, acz = c.Z - a.Z;
+            float areaXZ = MathF.Abs(abx * acz - abz * acx) * 0.5f;
+            if (areaXZ > EdgeSealMaxAreaXZ) continue;
+            Blocked[t] = true;
+            BlockedTag[t] = $"{tag}|rect {size} edge a={areaXZ:F2} in={depth:F2}";
+            marked++;
+        }
+        return marked;
+    }
+
+    /// <summary>How far past its own footprint a rectangle obstacle blocks
+    /// (see <see cref="MarkObstacleRect"/>): a little clearance for bodies.</summary>
+    public const float ObstacleRectMargin = 0.1f;
+
+    /// <summary>How much of a small triangle's edge must lie inside a
+    /// rectangle obstacle's footprint for the edge test to seal it.</summary>
+    public const float ObstacleRectEdgeDepth = 0.4f;
+
+    /// <summary>How far outside a rectangle obstacle's footprint a small
+    /// triangle's centre may lie and still be sealed by an edge crossing.</summary>
+    public const float ObstacleRectEdgeReach = 0.3f;
 
     /// <summary>SC-NAV-EDGE-SEAL-AREA — largest XZ triangle area (m²) the
     /// edge-clip test may fully seal. Calibrated from live blame data
