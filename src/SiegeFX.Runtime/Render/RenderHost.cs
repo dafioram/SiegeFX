@@ -24522,7 +24522,14 @@ void main()
                         var ird = s.CurrentTransform.Translation - _playerFollower.Position;
                         if (ird.X * ird.X + ird.Z * ird.Z
                             > _aiInterestRadius * _aiInterestRadius)
+                        {
+                            // Frozen AI stands still. Left as it was, an actor
+                            // caught mid-stride kept playing its walk cycle on
+                            // the spot until the player came within the radius
+                            // (krugs and chickens "walking in place").
+                            s.IsMoving = false;
                             continue;
+                        }
                     }
                     // SC-ALIGNMENT — only evil-chain actors hunt the party;
                     // good combatants (guards, kings) never turn on you.
@@ -24563,7 +24570,7 @@ void main()
                                     - s.CurrentTransform.Translation;
                                 near = dv.X * dv.X + dv.Z * dv.Z < wake2;
                             }
-                            if (!near && !hurt) continue;   // stay buried
+                            if (!near && !hurt) { s.IsMoving = false; continue; }   // stay buried
                             s.StartupAwakened = true;
                             s.Actor.Buried = false;
                             s.Actor.Awakened = true;
