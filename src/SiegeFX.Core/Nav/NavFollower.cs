@@ -176,6 +176,43 @@ public sealed class NavFollower
         return false;
     }
 
+    /// <summary>How many path triangles past the current one the stand probe
+    /// tries first (a 50ms sub-step crosses at most a few).</summary>
+    private const int PathProbeLookahead = 6;
+
+    /// <summary>SC-NAV-PATH-LAYER — the stand probe tries the walker's own
+    /// path triangles first. Where floors overlap in plan view (a stair
+    /// running over or beside the room below it, a landing above the
+    /// stairwell), the general probe ranks candidates by mesh adjacency
+    /// and height and could bind the step to the floor under the stair;
+    /// the step-down gate then refused that drop and the hero held at the
+    /// stair top replanning forever (field log: a farmhouse stair, every
+    /// path down from the upper floor pinned at the same corner). A* has
+    /// already chosen the layer, so a point on one of the next path
+    /// triangles stands there. Same height gate as the general probe.</summary>
+    private bool TryFindPathStandTriangle(float x, float z, out int tri)
+    {
+        tri = -1;
+        if (_path.Count == 0 || _pathIdx < 0) return false;
+        var p = new Vector3(x, Position.Y, z);
+        float bestDy = float.PositiveInfinity;
+        int end = Math.Min(_pathIdx + PathProbeLookahead, _path.Count - 1);
+        for (int k = _pathIdx; k <= end; k++)
+        {
+            int t = _path[k];
+            if (t < 0 || t >= Mesh.TriangleCount) continue;
+            var a = Mesh.Vertices[Mesh.Indices[3 * t + 0]];
+            var b = Mesh.Vertices[Mesh.Indices[3 * t + 1]];
+            var c = Mesh.Vertices[Mesh.Indices[3 * t + 2]];
+            if (!NavMesh.PointInTriangleXZ(p, a, b, c)) continue;
+            float dy = MathF.Abs(Mesh.SampleYOnTriangle(t, p) - Position.Y);
+            if (dy > MaxRebindDy || dy >= bestDy) continue;
+            bestDy = dy;
+            tri = t;
+        }
+        return tri >= 0;
+    }
+
     /// <summary>Per-actor traversal policy: which kinds (Floor / Water) the follower can
     /// enter and at what cost. Defaults to <see cref="NavTraversal.LandOnly"/>; assign
     /// <see cref="NavTraversal.Amphibious"/> (or a custom one) for swimmers. Re-read on
@@ -594,7 +631,8 @@ public sealed class NavFollower
             // SC-NAV-VERTICAL-REBIND — the probe is Y-gated; a hit on a
             // vertically unrelated overlapping surface counts as off-mesh
             // and flows into the swept clamp below instead of being walked.
-            bool onMesh = TryFindStandTriangle(new Vector3(nx, Position.Y, nz), out var hit);
+            bool onMesh = TryFindPathStandTriangle(nx, nz, out var hit)
+                          || TryFindStandTriangle(new Vector3(nx, Position.Y, nz), out hit);
             if (onMesh)
             {
                 if (hit == _path[_pathIdx])
