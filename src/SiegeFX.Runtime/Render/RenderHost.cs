@@ -1827,6 +1827,8 @@ public sealed class RenderHost : IDisposable
     // (50 ms) behind sim, which is invisible at this cadence.
     private Vector3 _playerRenderPosPrev;
     private Vector3 _playerRenderPosNext;
+    private float _playerRenderY;
+    private bool _playerRenderYInit;
     private Vector3 _playerRenderFacingPrev = Vector3.UnitZ;
     private Vector3 _playerRenderFacingNext = Vector3.UnitZ;
     private bool _playerRenderInit;
@@ -18169,6 +18171,7 @@ void main()
                             // cut, not a smear across the farm.
                             _playerRenderPosPrev = tp;
                             _playerRenderPosNext = tp;
+                            _playerRenderYInit = false;
                             if (_player is not null)
                                 _player.CurrentTransform = Matrix4x4.CreateTranslation(tp);
                             Console.WriteLine($"[nis] hero teleported near scripted target ({tdist:F0}u jump)");
@@ -25049,6 +25052,20 @@ void main()
             {
                 float alpha = (float)Math.Min(1.0, _actorTickAccumulator / (1.0 / SkritInstance.FramesPerSecond));
                 var pos = Vector3.Lerp(_playerRenderPosPrev, _playerRenderPosNext, alpha);
+                // SC-STAIR-GLIDE — the walker's Y follows the nav mesh exactly,
+                // and stair meshes are stepped: 0.2u treads every tick, and at
+                // the farmhouse stair top a missing tread drops 0.9u in one
+                // 50ms tick, which read as a hop. The drawn height eases toward
+                // the walked one (time constant ~45ms), so the hero glides down
+                // the steps; a jump of more than 2.5u (teleport, lift) snaps.
+                if (!_playerRenderYInit || MathF.Abs(pos.Y - _playerRenderY) > 2.5f)
+                {
+                    _playerRenderY = pos.Y;
+                    _playerRenderYInit = true;
+                }
+                else
+                    _playerRenderY += (pos.Y - _playerRenderY) * (1f - MathF.Exp(-(float)dt * 22f));
+                pos.Y = _playerRenderY;
                 var face = Vector3.Lerp(_playerRenderFacingPrev, _playerRenderFacingNext, alpha);
                 if (face.LengthSquared() > 1e-6f) face = Vector3.Normalize(face);
                 else face = _playerRenderFacingNext;
@@ -28679,6 +28696,7 @@ void main()
         // the body doesn't lerp from the previous PC's last position.
         _playerRenderInit = false;
         _playerRenderPosPrev = _playerRenderPosNext = spawnPos;
+        _playerRenderYInit = false;
         _playerRenderFacingPrev = _playerRenderFacingNext = _playerFacing;
 
         // Phase 14b — seed PC equipment from the template's [inventory][equipment]
@@ -43308,6 +43326,7 @@ void main()
             _playerRenderInit = false;
             if (_playerFollower is not null)
                 _playerRenderPosPrev = _playerRenderPosNext = _playerFollower.Position;
+                _playerRenderYInit = false;
             _playerRenderFacingPrev = _playerRenderFacingNext = _playerFacing;
             _cameraMode   = (CameraMode)ps.CameraMode;
             _chaseYaw     = ps.ChaseYaw;
