@@ -99,6 +99,16 @@ public sealed class NavMesh
     /// <summary>SC-DOORS-BLOCK — reset every obstacle mark so the map can be
     /// re-stamped from live state (door opened, prop destroyed). Cheap:
     /// one Array.Clear; the caller re-marks everything that still blocks.</summary>
+    /// <summary>Blocks one triangle outright, blamed on <paramref name="tag"/>
+    /// (restoring a dumped area's blocked set in a replay).</summary>
+    public void BlockTriangle(int tri, string? tag)
+    {
+        Blocked ??= new bool[TriangleCount];
+        BlockedTag ??= new string?[TriangleCount];
+        Blocked[tri] = true;
+        BlockedTag[tri] = tag;
+    }
+
     public void ClearObstacles()
     {
         if (Blocked is not null) Array.Clear(Blocked);
@@ -710,72 +720,7 @@ public sealed class NavMesh
         // adjacencies for boundary-edge pairs that share an XZ footprint and a wadeable Y.
         int seamEdges = StitchLandWaterSeams(triCount, indices, neighbors, vertsArr, kindsArr);
 
-        var centroids = new Vector3[triCount];
-        float gMinX = float.PositiveInfinity, gMinZ = float.PositiveInfinity;
-        float gMaxX = float.NegativeInfinity, gMaxZ = float.NegativeInfinity;
-        for (int t = 0; t < triCount; t++)
-        {
-            var p0 = vertsArr[indices[3 * t + 0]];
-            var p1 = vertsArr[indices[3 * t + 1]];
-            var p2 = vertsArr[indices[3 * t + 2]];
-            centroids[t] = (p0 + p1 + p2) / 3f;
-            float minX = MathF.Min(p0.X, MathF.Min(p1.X, p2.X));
-            float maxX = MathF.Max(p0.X, MathF.Max(p1.X, p2.X));
-            float minZ = MathF.Min(p0.Z, MathF.Min(p1.Z, p2.Z));
-            float maxZ = MathF.Max(p0.Z, MathF.Max(p1.Z, p2.Z));
-            if (minX < gMinX) gMinX = minX;
-            if (minZ < gMinZ) gMinZ = minZ;
-            if (maxX > gMaxX) gMaxX = maxX;
-            if (maxZ > gMaxZ) gMaxZ = maxZ;
-        }
-
-        // Build the XZ uniform grid. Empty mesh → 1x1 grid with one null cell.
-        int cellsX, cellsZ;
-        float originX, originZ;
-        int[]?[] grid;
-        if (triCount == 0)
-        {
-            cellsX = cellsZ = 1;
-            originX = originZ = 0f;
-            grid = new int[]?[1];
-        }
-        else
-        {
-            originX = gMinX;
-            originZ = gMinZ;
-            cellsX = Math.Max(1, (int)MathF.Ceiling((gMaxX - gMinX) / GridCellSize) + 1);
-            cellsZ = Math.Max(1, (int)MathF.Ceiling((gMaxZ - gMinZ) / GridCellSize) + 1);
-            // First pass counts per-cell; second pass fills. Temporary List<int> arena
-            // keeps the final int[] buckets tight (no List<int> overhead per cell).
-            var buckets = new List<int>?[cellsX * cellsZ];
-            for (int t = 0; t < triCount; t++)
-            {
-                var p0 = vertsArr[indices[3 * t + 0]];
-                var p1 = vertsArr[indices[3 * t + 1]];
-                var p2 = vertsArr[indices[3 * t + 2]];
-                float minX = MathF.Min(p0.X, MathF.Min(p1.X, p2.X));
-                float maxX = MathF.Max(p0.X, MathF.Max(p1.X, p2.X));
-                float minZ = MathF.Min(p0.Z, MathF.Min(p1.Z, p2.Z));
-                float maxZ = MathF.Max(p0.Z, MathF.Max(p1.Z, p2.Z));
-                int cx0 = (int)MathF.Floor((minX - originX) / GridCellSize);
-                int cx1 = (int)MathF.Floor((maxX - originX) / GridCellSize);
-                int cz0 = (int)MathF.Floor((minZ - originZ) / GridCellSize);
-                int cz1 = (int)MathF.Floor((maxZ - originZ) / GridCellSize);
-                cx0 = Math.Clamp(cx0, 0, cellsX - 1);
-                cx1 = Math.Clamp(cx1, 0, cellsX - 1);
-                cz0 = Math.Clamp(cz0, 0, cellsZ - 1);
-                cz1 = Math.Clamp(cz1, 0, cellsZ - 1);
-                for (int cz = cz0; cz <= cz1; cz++)
-                for (int cx = cx0; cx <= cx1; cx++)
-                {
-                    int cell = cz * cellsX + cx;
-                    (buckets[cell] ??= new List<int>()).Add(t);
-                }
-            }
-            grid = new int[]?[buckets.Length];
-            for (int i = 0; i < buckets.Length; i++)
-                grid[i] = buckets[i]?.ToArray();
-        }
+        var (centroids, originX, originZ, cellsX, cellsZ, grid) = BuildCentroidsAndGrid(vertsArr, indices, triCount);
 
         return new NavMesh(
             vertsArr,
@@ -800,6 +745,71 @@ public sealed class NavMesh
             cellsX,
             cellsZ,
             grid);
+    }
+
+    /// <summary>Per-triangle centroids and the XZ uniform lookup grid (an
+    /// empty mesh gets a 1×1 grid with one null cell).</summary>
+    private static (Vector3[] Centroids, float OriginX, float OriginZ, int CellsX, int CellsZ, int[]?[] Grid)
+        BuildCentroidsAndGrid(Vector3[] vertsArr, int[] indices, int triCount)
+    {
+        var centroids = new Vector3[triCount];
+        float gMinX = float.PositiveInfinity, gMinZ = float.PositiveInfinity;
+        float gMaxX = float.NegativeInfinity, gMaxZ = float.NegativeInfinity;
+        for (int t = 0; t < triCount; t++)
+        {
+            var p0 = vertsArr[indices[3 * t + 0]];
+            var p1 = vertsArr[indices[3 * t + 1]];
+            var p2 = vertsArr[indices[3 * t + 2]];
+            centroids[t] = (p0 + p1 + p2) / 3f;
+            gMinX = MathF.Min(gMinX, MathF.Min(p0.X, MathF.Min(p1.X, p2.X)));
+            gMaxX = MathF.Max(gMaxX, MathF.Max(p0.X, MathF.Max(p1.X, p2.X)));
+            gMinZ = MathF.Min(gMinZ, MathF.Min(p0.Z, MathF.Min(p1.Z, p2.Z)));
+            gMaxZ = MathF.Max(gMaxZ, MathF.Max(p0.Z, MathF.Max(p1.Z, p2.Z)));
+        }
+        if (triCount == 0) return (centroids, 0f, 0f, 1, 1, new int[]?[1]);
+        float originX = gMinX, originZ = gMinZ;
+        int cellsX = Math.Max(1, (int)MathF.Ceiling((gMaxX - gMinX) / GridCellSize) + 1);
+        int cellsZ = Math.Max(1, (int)MathF.Ceiling((gMaxZ - gMinZ) / GridCellSize) + 1);
+        // First pass collects per-cell lists; the final int[] buckets stay
+        // tight (no List<int> overhead per cell).
+        var buckets = new List<int>?[cellsX * cellsZ];
+        for (int t = 0; t < triCount; t++)
+        {
+            var p0 = vertsArr[indices[3 * t + 0]];
+            var p1 = vertsArr[indices[3 * t + 1]];
+            var p2 = vertsArr[indices[3 * t + 2]];
+            int cx0 = Math.Clamp((int)MathF.Floor((MathF.Min(p0.X, MathF.Min(p1.X, p2.X)) - originX) / GridCellSize), 0, cellsX - 1);
+            int cx1 = Math.Clamp((int)MathF.Floor((MathF.Max(p0.X, MathF.Max(p1.X, p2.X)) - originX) / GridCellSize), 0, cellsX - 1);
+            int cz0 = Math.Clamp((int)MathF.Floor((MathF.Min(p0.Z, MathF.Min(p1.Z, p2.Z)) - originZ) / GridCellSize), 0, cellsZ - 1);
+            int cz1 = Math.Clamp((int)MathF.Floor((MathF.Max(p0.Z, MathF.Max(p1.Z, p2.Z)) - originZ) / GridCellSize), 0, cellsZ - 1);
+            for (int cz = cz0; cz <= cz1; cz++)
+            for (int cx = cx0; cx <= cx1; cx++)
+                (buckets[cz * cellsX + cx] ??= new List<int>()).Add(t);
+        }
+        var grid = new int[]?[buckets.Length];
+        for (int i = 0; i < buckets.Length; i++)
+            grid[i] = buckets[i]?.ToArray();
+        return (centroids, originX, originZ, cellsX, cellsZ, grid);
+    }
+
+    /// <summary>A nav mesh from explicit triangles: three indices into
+    /// <paramref name="vertices"/> per triangle, and per triangle the
+    /// neighbour across the edge opposite each vertex (-1 for none), as
+    /// <see cref="Neighbors"/> holds them. For tests and the nav tools'
+    /// replays of a dumped area; all floor, one source node.</summary>
+    public static NavMesh FromTriangles(Vector3[] vertices, int[] indices, int[] neighbors,
+                                        Dictionary<int, int[]>? extraLinks = null, uint[]? snodeGuids = null)
+    {
+        int triCount = indices.Length / 3;
+        if (neighbors.Length != indices.Length)
+            throw new ArgumentException("one neighbour per triangle edge", nameof(neighbors));
+        var (centroids, originX, originZ, cellsX, cellsZ, grid) = BuildCentroidsAndGrid(vertices, indices, triCount);
+        var kinds = new SnoModel.FloorKind[triCount];
+        Array.Fill(kinds, SnoModel.FloorKind.Floor);
+        return new NavMesh(vertices, indices, neighbors, kinds, centroids,
+            new int[triCount], new int[triCount], snodeGuids ?? new uint[triCount], 1,
+            0, 0, 0, 0, extraLinks is { Count: > 0 } ? extraLinks : null, 0,
+            originX, originZ, cellsX, cellsZ, grid);
     }
 
     /// <summary>SC-NAV-CROSS-SNO-STITCH — door-anchored cross-SNO nav
@@ -885,6 +895,29 @@ public sealed class NavMesh
         }
         Vector3 TriCentroid(int t) =>
             (verts[indices[3 * t + 0]] + verts[indices[3 * t + 1]] + verts[indices[3 * t + 2]]) / 3f;
+        // How far apart two triangles are where they come closest (XZ), and
+        // their height difference there: each one's corners against the
+        // other's surface, both ways.
+        (float Gap, float Dy) TriangleGap(int ta, int tb)
+        {
+            float bestGap = float.PositiveInfinity, bestDy = float.PositiveInfinity;
+            void Probe(int from, int onto)
+            {
+                var a = verts[indices[3 * onto + 0]];
+                var b = verts[indices[3 * onto + 1]];
+                var c = verts[indices[3 * onto + 2]];
+                for (int k = 0; k < 3; k++)
+                {
+                    var p = verts[indices[3 * from + k]];
+                    var (q, gap) = ClosestOnTriangleXZ(p, a, b, c);
+                    float dy = MathF.Abs(q.Y - p.Y);
+                    if (gap < bestGap - 1e-4f || (gap < bestGap + 1e-4f && dy < bestDy)) { bestGap = gap; bestDy = dy; }
+                }
+            }
+            Probe(ta, tb);
+            Probe(tb, ta);
+            return (bestGap, bestDy);
+        }
         // Split a small tri set into its slot-connected local components.
         // Stepped pieces fragment internally: riser faces are degenerate in XZ
         // and dropped from the mesh, so each tread strip is its own island —
@@ -1009,9 +1042,14 @@ public sealed class NavMesh
                 // pair, and retail treats that as "connected". Carry the link
                 // in the sparse overflow table instead: for every pair of
                 // near-anchor LOCAL COMPONENTS (one per tread strip on stepped
-                // pieces) not already adjacent, wire the best centroid pair,
-                // Y-gated (1.0u) so stacked layers can't join (same reasoning
-                // as the walker's rebind gate).
+                // pieces) not already adjacent, wire the closest pair of
+                // triangles whose height where they come closest is within a
+                // step (DoorSeamEdgeYTolerance), as a paired seam's must be.
+                // Gating centroids at 1u (the first cut) linked a house's
+                // floor to the yard through every wall near its placement
+                // "door": the farmhouse sits on its terrain node by one, and
+                // floor (Y1) and yard (Y0) pieces within 6u of it paired up
+                // across a 1u ledge, so A* planned walks through the walls.
                 if (!trisBySnode.TryGetValue(node.Guid, out var nearTris)
                     || !trisBySnode.TryGetValue(farNode.Guid, out var farTris)) continue;
                 var aNear = new List<int>();
@@ -1029,14 +1067,11 @@ public sealed class NavMesh
                     float bestScore = float.MaxValue;
                     foreach (var tA in compA)
                     {
-                        var ca = TriCentroid(tA);
                         foreach (var tB in compB)
                         {
-                            var cb = TriCentroid(tB);
-                            float dy = MathF.Abs(ca.Y - cb.Y);
-                            if (dy > 1.0f) continue;
-                            float ddx = ca.X - cb.X, ddz = ca.Z - cb.Z;
-                            float score = MathF.Sqrt(ddx * ddx + ddz * ddz) + dy;
+                            var (gap, dy) = TriangleGap(tA, tB);
+                            if (dy > DoorSeamEdgeYTolerance) continue;
+                            float score = gap + dy;
                             if (score < bestScore) { bestScore = score; bestA = tA; bestB = tB; }
                         }
                     }
@@ -1050,6 +1085,28 @@ public sealed class NavMesh
             }
         }
         return stitched;
+    }
+
+    /// <summary>The point of triangle abc nearest <paramref name="p"/> in plan
+    /// view (Y on the triangle's surface there), and its XZ distance.</summary>
+    private static (Vector3 Point, float DistXZ) ClosestOnTriangleXZ(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+    {
+        if (PointInTriangleXZ(p, a, b, c))
+            return (new Vector3(p.X, InterpolateYXZ(p.X, p.Z, a, b, c), p.Z), 0f);
+        Vector3 best = a;
+        float bestD = float.PositiveInfinity;
+        void Edge(Vector3 u, Vector3 v)
+        {
+            float ex = v.X - u.X, ez = v.Z - u.Z;
+            float len2 = ex * ex + ez * ez;
+            float t = len2 > 1e-12f ? Math.Clamp(((p.X - u.X) * ex + (p.Z - u.Z) * ez) / len2, 0f, 1f) : 0f;
+            var q = u + (v - u) * t;
+            float dx = p.X - q.X, dz = p.Z - q.Z;
+            float d = MathF.Sqrt(dx * dx + dz * dz);
+            if (d < bestD) { bestD = d; best = q; }
+        }
+        Edge(a, b); Edge(b, c); Edge(c, a);
+        return (best, bestD);
     }
 
     /// <summary>Wires cross-kind adjacencies for Floor↔Water boundary edges that visually
