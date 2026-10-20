@@ -26816,9 +26816,16 @@ void main()
         // OFF: Silk's cap sleeps on the coarse Windows timer and fights the
         // swap-interval pacing, which reads as constant micro-hitching. The
         // cap only applies when vsync is off.
-        _window.FramesPerSecond = !s.VSync && double.TryParse(s.FpsCap, out var cap) && cap > 0
-            ? cap : 0.0;
+        // "Unlimited" still stops at MaxFrameRate: past it the frames are
+        // invisible work (the main menu ran at 1000+ fps uncapped).
+        _window.FramesPerSecond = s.VSync ? 0.0
+            : double.TryParse(s.FpsCap, out var cap) && cap > 0 ? Math.Min(cap, MaxFrameRate)
+            : MaxFrameRate;
     }
+
+    /// <summary>The highest frame rate the software limiter allows with
+    /// vsync off, "Unlimited" included.</summary>
+    private const double MaxFrameRate = 240.0;
 
     // SC-DISPLAY-MODE — last windowed (decorated) top-left, captured when
     // leaving Windowed for Fullscreen/Borderless so the return trip lands
