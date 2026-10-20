@@ -1407,7 +1407,7 @@ public sealed class NavMesh
     /// that got obstacle-marked after spawn still needs a bind).</summary>
     public bool TryFindTriangleNear(Vector3 worldPos, int nearTri, float maxDy,
                                     bool includeFadeHidden, out int triIndex,
-                                    NavTraversal? traversal = null)
+                                    NavTraversal? traversal = null, float maxRise = float.PositiveInfinity)
     {
         triIndex = -1;
         if (TriangleCount == 0) return false;
@@ -1435,8 +1435,9 @@ public sealed class NavMesh
             var c = Vertices[Indices[3 * t + 2]];
             if (!PointInTriangleXZ(worldPos, a, b, c)) continue;
             if (!includeFadeHidden && FadeHidden is not null && t < FadeHidden.Length && FadeHidden[t]) continue;
-            float dy = MathF.Abs(InterpolateYXZ(worldPos.X, worldPos.Z, a, b, c) - worldPos.Y);
-            if (dy > maxDy) continue;
+            float rise = InterpolateYXZ(worldPos.X, worldPos.Z, a, b, c) - worldPos.Y;
+            float dy = MathF.Abs(rise);
+            if (dy > maxDy || rise > maxRise) continue;
             int rank = t == nearTri ? 0 : IsNeighborOfNear(t) ? 1 : 2;
             if (Blocked is not null && t < Blocked.Length && Blocked[t]) rank += 3;
             // SC-NAV-KIND-BIND — a triangle whose kind the walker can't
