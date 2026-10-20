@@ -124,6 +124,22 @@ public sealed class NavFollower
     // are ungated (the ±MaxRebindDy probe already bounds them).
     private const float MaxStepDownDy = 1.0f;
 
+    // SC-NAV-STEP-UP-GATE — the largest climb a moving step may take when it
+    // binds off its path (the path's own triangles were chosen by A* and are
+    // exempt). Stair treads rise ~0.07u and a steep ramp ~0.35u per sub-step;
+    // a bigger rise is a jump onto the floor above. Field case: the
+    // farmhouse stair's last leg hugs its south edge, which lies under the
+    // upper floor; a step a hair off the stair bound to the upper floor 1.4u
+    // up (nearer in height than the room 1.8u down), the hero "arrived" at
+    // the stair foot standing upstairs, and stuck against the post there.
+    private const float MaxStepUpDy = 0.6f;
+
+    // SC-NAV-PATH-SLACK — a step landing this close (XZ) outside one of the
+    // next path triangles still stands on it: a leg pulled tight along a
+    // corridor edge stays on the layer A* chose instead of falling to the
+    // general probe over a float hair.
+    private const float PathEdgeSlack = 0.25f;
+
     // SC-NAV-SEAM-HOP — door-stitched seams (NavMesh.StitchSnoDoorSeams) wire
     // A* adjacency between boundary edges up to DoorSeamEdgePairDistance
     // (1.5u) apart WITHOUT any covering geometry: the strip between the two
@@ -151,13 +167,15 @@ public sealed class NavFollower
     /// over a stream bed converging at the banks), so a walker's Y can't
     /// flicker onto the other layer mid-stride and read as "dipping into
     /// the ground".</summary>
-    private bool TryFindStandTriangle(Vector3 pos, out int tri)
+    private bool TryFindStandTriangle(Vector3 pos, out int tri, bool stepping = false)
     {
         // SC-NAV-KIND-BIND — pass the walker's traversal so candidates it
         // can't traverse (Water for LandOnly) rank below every legal layer;
         // see TryFindTriangleNear for the bridge-bank flip this prevents.
+        // A moving step climbs at most MaxStepUpDy (SC-NAV-STEP-UP-GATE).
         if (Mesh.TryFindTriangleNear(pos, CurrentTriangle, MaxRebindDy,
-                includeFadeHidden: true, out tri, Traversal))
+                includeFadeHidden: true, out tri, Traversal,
+                stepping ? MaxStepUpDy : float.PositiveInfinity))
             return true;
         tri = -1;
         return false;
@@ -191,13 +209,26 @@ public sealed class NavFollower
             var a = Mesh.Vertices[Mesh.Indices[3 * t + 0]];
             var b = Mesh.Vertices[Mesh.Indices[3 * t + 1]];
             var c = Mesh.Vertices[Mesh.Indices[3 * t + 2]];
-            if (!NavMesh.PointInTriangleXZ(p, a, b, c)) continue;
+            if (!NavMesh.PointInTriangleXZ(p, a, b, c) && DistanceToTriangleXZ(p, a, b, c) > PathEdgeSlack) continue;
             float dy = MathF.Abs(Mesh.SampleYOnTriangle(t, p) - Position.Y);
             if (dy > MaxRebindDy || dy >= bestDy) continue;
             bestDy = dy;
             tri = t;
         }
         return tri >= 0;
+    }
+
+    static float DistanceToTriangleXZ(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+    {
+        static float Seg(Vector3 p, Vector3 u, Vector3 v)
+        {
+            float ex = v.X - u.X, ez = v.Z - u.Z;
+            float len2 = ex * ex + ez * ez;
+            float t = len2 > 1e-12f ? Math.Clamp(((p.X - u.X) * ex + (p.Z - u.Z) * ez) / len2, 0f, 1f) : 0f;
+            float dx = p.X - (u.X + ex * t), dz = p.Z - (u.Z + ez * t);
+            return MathF.Sqrt(dx * dx + dz * dz);
+        }
+        return MathF.Min(Seg(p, a, b), MathF.Min(Seg(p, b, c), Seg(p, c, a)));
     }
 
     /// <summary>Per-actor traversal policy: which kinds (Floor / Water) the follower can
@@ -516,7 +547,7 @@ public sealed class NavFollower
                                 Position.X + ex * EscapeStepDist,
                                 Position.Y,
                                 Position.Z + ez * EscapeStepDist);
-                            if (TryFindStandTriangle(escape, out var escapeTri))
+                            if (TryFindStandTriangle(escape, out var escapeTri, stepping: true))
                             {
                                 if (DiagnosticLogging)
                                 {
@@ -617,7 +648,7 @@ public sealed class NavFollower
             // vertically unrelated overlapping surface counts as off-mesh
             // and flows into the swept clamp below instead of being walked.
             bool onMesh = TryFindPathStandTriangle(nx, nz, out var hit)
-                          || TryFindStandTriangle(new Vector3(nx, Position.Y, nz), out hit);
+                          || TryFindStandTriangle(new Vector3(nx, Position.Y, nz), out hit, stepping: true);
             if (onMesh)
             {
                 if (hit == _path[_pathIdx])
@@ -705,7 +736,7 @@ public sealed class NavFollower
                     float mid = (lo + hi) * 0.5f;
                     float tx = Position.X + (nx - Position.X) * mid;
                     float tz = Position.Z + (nz - Position.Z) * mid;
-                    if (TryFindStandTriangle(new Vector3(tx, Position.Y, tz), out var thit))
+                    if (TryFindStandTriangle(new Vector3(tx, Position.Y, tz), out var thit, stepping: true))
                     { lo = mid; standing = thit; }
                     else hi = mid;
                 }
