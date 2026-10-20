@@ -19,17 +19,29 @@ public static class NavFunnel
     /// always the corner where the path first turns away from a straight line to the
     /// goal; the last waypoint is always <paramref name="goal"/>. If the start and
     /// goal are mutually visible through the corridor, the output contains just
-    /// <paramref name="goal"/>.</summary>
+    /// <paramref name="goal"/>.
+    /// <para><paramref name="portalOutput"/>, when given, receives each
+    /// waypoint's portal index: portal k (1..N-1) is the edge from
+    /// trianglePath[k-1] into trianglePath[k], and the goal is portal N
+    /// (N = trianglePath.Count). A walker has truly reached a waypoint only
+    /// once it stands on trianglePath[k-1] or later: in plan view the stairs
+    /// below a landing and the landing share XZ.</para></summary>
     public static void BuildWaypoints(
         NavMesh mesh,
         IReadOnlyList<int> trianglePath,
         Vector3 start,
         Vector3 goal,
-        List<Vector3> output)
+        List<Vector3> output,
+        List<int>? portalOutput = null)
     {
+        void Emit(Vector3 p, int portal)
+        {
+            output.Add(p);
+            portalOutput?.Add(portal);
+        }
         if (trianglePath.Count == 0)
         {
-            output.Add(goal);
+            Emit(goal, 0);
             return;
         }
 
@@ -136,7 +148,7 @@ public static class NavFunnel
                 else
                 {
                     // Right would cross left — emit left as new apex and restart.
-                    if (output.Count == 0 || !PointEqualsXZ(output[^1], left)) output.Add(left);
+                    if (output.Count == 0 || !PointEqualsXZ(output[^1], left)) Emit(left, leftIdx);
                     apex = left;
                     apexIdx = leftIdx;
                     left = apex;
@@ -158,7 +170,7 @@ public static class NavFunnel
                 }
                 else
                 {
-                    if (output.Count == 0 || !PointEqualsXZ(output[^1], right)) output.Add(right);
+                    if (output.Count == 0 || !PointEqualsXZ(output[^1], right)) Emit(right, rightIdx);
                     apex = right;
                     apexIdx = rightIdx;
                     left = apex;
@@ -172,7 +184,7 @@ public static class NavFunnel
         }
 
         // Always emit the goal as the final waypoint.
-        if (output.Count == 0 || !PointEqualsXZ(output[^1], goal)) output.Add(goal);
+        if (output.Count == 0 || !PointEqualsXZ(output[^1], goal)) Emit(goal, trianglePath.Count);
     }
 
     private static bool TryGetSharedEdge(NavMesh mesh, int triA, int triB, out Vector3 p, out Vector3 q, out Vector3 opposite)
