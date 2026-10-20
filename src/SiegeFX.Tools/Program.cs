@@ -3643,12 +3643,18 @@ static int ReplayWalk(SiegeFX.Core.Nav.NavMesh mesh, Vector3 from, Vector3 to, f
         Console.WriteLine($"  wp[{w,2}] {FormatVec(hero.Waypoints[w])}");
     string outcome = hero.PathBlocked ? "BLOCKED" : "PINNED";
     float budget = DistXZ(from, to) / MathF.Max(1f, speed) * 4f + 10f, walked = 0f;
+    int offMesh = 0;
     int lastTri = hero.CurrentTriangle;
     for (float t = 0f; t < budget && !hero.PathBlocked; t += dt)
     {
         var before = hero.Position;
         hero.Tick(dt);
         walked += DistXZ(before, hero.Position);
+        // A walker off every triangle can't replan from where it stands.
+        if (!mesh.TryFindTriangle(hero.Position, out _, includeFadeHidden: true))
+        {
+            if (offMesh++ == 0) Console.WriteLine($"  t={t,5:F2}  {FormatVec(hero.Position)} OFF THE MESH");
+        }
         if (hero.CurrentTriangle != lastTri)
         {
             Console.WriteLine($"  t={t,5:F2}  {FormatVec(hero.Position)} tri={hero.CurrentTriangle}");
@@ -3657,8 +3663,9 @@ static int ReplayWalk(SiegeFX.Core.Nav.NavMesh mesh, Vector3 from, Vector3 to, f
         if (hero.ReachedGoal) { outcome = DistXZ(hero.Position, to) <= 1.5f ? "OK" : "PARTIAL"; break; }
         if (hero.PathBlocked) outcome = "STUCK";
     }
-    Console.WriteLine($"Outcome    : {outcome} at {FormatVec(hero.Position)} tri={hero.CurrentTriangle}, walked {walked:F1}u");
-    return outcome == "OK" ? 0 : 3;
+    Console.WriteLine($"Outcome    : {outcome} at {FormatVec(hero.Position)} tri={hero.CurrentTriangle}, walked {walked:F1}u" +
+                      (offMesh > 0 ? $", OFF THE MESH for {offMesh} tick(s)" : ""));
+    return outcome == "OK" && offMesh == 0 ? 0 : 3;
 }
 
 /// <summary>`region replay-dump` — replays one click walk on an area written
