@@ -934,6 +934,29 @@ public sealed class NavMesh
         }
         Vector3 TriCentroid(int t) =>
             (verts[indices[3 * t + 0]] + verts[indices[3 * t + 1]] + verts[indices[3 * t + 2]]) / 3f;
+        // How far apart two triangles are where they come closest (XZ), and
+        // their height difference there: each one's corners against the
+        // other's surface, both ways.
+        (float Gap, float Dy) TriangleGap(int ta, int tb)
+        {
+            float bestGap = float.PositiveInfinity, bestDy = float.PositiveInfinity;
+            void Probe(int from, int onto)
+            {
+                var a = verts[indices[3 * onto + 0]];
+                var b = verts[indices[3 * onto + 1]];
+                var c = verts[indices[3 * onto + 2]];
+                for (int k = 0; k < 3; k++)
+                {
+                    var p = verts[indices[3 * from + k]];
+                    var (q, gap) = ClosestOnTriangleXZ(p, a, b, c);
+                    float dy = MathF.Abs(q.Y - p.Y);
+                    if (gap < bestGap - 1e-4f || (gap < bestGap + 1e-4f && dy < bestDy)) { bestGap = gap; bestDy = dy; }
+                }
+            }
+            Probe(ta, tb);
+            Probe(tb, ta);
+            return (bestGap, bestDy);
+        }
         // Split a small tri set into its slot-connected local components.
         // Stepped pieces fragment internally: riser faces are degenerate in XZ
         // and dropped from the mesh, so each tread strip is its own island —
@@ -1058,9 +1081,14 @@ public sealed class NavMesh
                 // pair, and retail treats that as "connected". Carry the link
                 // in the sparse overflow table instead: for every pair of
                 // near-anchor LOCAL COMPONENTS (one per tread strip on stepped
-                // pieces) not already adjacent, wire the best centroid pair,
-                // Y-gated (1.0u) so stacked layers can't join (same reasoning
-                // as the walker's rebind gate).
+                // pieces) not already adjacent, wire the closest pair of
+                // triangles whose height where they come closest is within a
+                // step (DoorSeamEdgeYTolerance), as a paired seam's must be.
+                // Gating centroids at 1u (the first cut) linked a house's
+                // floor to the yard through every wall near its placement
+                // "door": the farmhouse sits on its terrain node by one, and
+                // floor (Y1) and yard (Y0) pieces within 6u of it paired up
+                // across a 1u ledge, so A* planned walks through the walls.
                 if (!trisBySnode.TryGetValue(node.Guid, out var nearTris)
                     || !trisBySnode.TryGetValue(farNode.Guid, out var farTris)) continue;
                 var aNear = new List<int>();
@@ -1078,14 +1106,11 @@ public sealed class NavMesh
                     float bestScore = float.MaxValue;
                     foreach (var tA in compA)
                     {
-                        var ca = TriCentroid(tA);
                         foreach (var tB in compB)
                         {
-                            var cb = TriCentroid(tB);
-                            float dy = MathF.Abs(ca.Y - cb.Y);
-                            if (dy > 1.0f) continue;
-                            float ddx = ca.X - cb.X, ddz = ca.Z - cb.Z;
-                            float score = MathF.Sqrt(ddx * ddx + ddz * ddz) + dy;
+                            var (gap, dy) = TriangleGap(tA, tB);
+                            if (dy > DoorSeamEdgeYTolerance) continue;
+                            float score = gap + dy;
                             if (score < bestScore) { bestScore = score; bestA = tA; bestB = tB; }
                         }
                     }
@@ -1099,6 +1124,28 @@ public sealed class NavMesh
             }
         }
         return stitched;
+    }
+
+    /// <summary>The point of triangle abc nearest <paramref name="p"/> in plan
+    /// view (Y on the triangle's surface there), and its XZ distance.</summary>
+    private static (Vector3 Point, float DistXZ) ClosestOnTriangleXZ(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+    {
+        if (PointInTriangleXZ(p, a, b, c))
+            return (new Vector3(p.X, InterpolateYXZ(p.X, p.Z, a, b, c), p.Z), 0f);
+        Vector3 best = a;
+        float bestD = float.PositiveInfinity;
+        void Edge(Vector3 u, Vector3 v)
+        {
+            float ex = v.X - u.X, ez = v.Z - u.Z;
+            float len2 = ex * ex + ez * ez;
+            float t = len2 > 1e-12f ? Math.Clamp(((p.X - u.X) * ex + (p.Z - u.Z) * ez) / len2, 0f, 1f) : 0f;
+            var q = u + (v - u) * t;
+            float dx = p.X - q.X, dz = p.Z - q.Z;
+            float d = MathF.Sqrt(dx * dx + dz * dz);
+            if (d < bestD) { bestD = d; best = q; }
+        }
+        Edge(a, b); Edge(b, c); Edge(c, a);
+        return (best, bestD);
     }
 
     /// <summary>Wires cross-kind adjacencies for Floor↔Water boundary edges that visually
