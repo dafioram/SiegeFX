@@ -68,6 +68,8 @@ public sealed class NavFollower
 
     private readonly List<int> _path = new();
     private readonly List<Vector3> _waypoints = new();
+    // Each waypoint's portal index along _path (NavFunnel.BuildWaypoints).
+    private readonly List<int> _waypointPortals = new();
     private readonly NavPathfinder.Workspace _workspace = new();
     private int _pathIdx;
     private int _waypointIdx;
@@ -200,9 +202,15 @@ public sealed class NavFollower
         tri = -1;
         if (_path.Count == 0 || _pathIdx < 0) return false;
         var p = new Vector3(x, Position.Y, z);
-        float bestDy = float.PositiveInfinity;
+        // Furthest along the path first: where the walker's own path triangles
+        // overlap in plan view (the room floor running under a stair's foot),
+        // A*'s order says which one it is moving onto. Picking the one nearest
+        // the walker's height instead kept a hero climbing from the room on
+        // the floor under the stair, never stepping onto the treads. A later
+        // triangle must still be a legal step (MaxStepUpDy up, MaxStepDownDy
+        // down); the walker's current one only needs the rebind gate.
         int end = Math.Min(_pathIdx + PathProbeLookahead, _path.Count - 1);
-        for (int k = _pathIdx; k <= end; k++)
+        for (int k = end; k >= _pathIdx; k--)
         {
             int t = _path[k];
             if (t < 0 || t >= Mesh.TriangleCount) continue;
@@ -210,12 +218,15 @@ public sealed class NavFollower
             var b = Mesh.Vertices[Mesh.Indices[3 * t + 1]];
             var c = Mesh.Vertices[Mesh.Indices[3 * t + 2]];
             if (!NavMesh.PointInTriangleXZ(p, a, b, c) && DistanceToTriangleXZ(p, a, b, c) > PathEdgeSlack) continue;
-            float dy = MathF.Abs(Mesh.SampleYOnTriangle(t, p) - Position.Y);
-            if (dy > MaxRebindDy || dy >= bestDy) continue;
-            bestDy = dy;
+            float dy = Mesh.SampleYOnTriangle(t, p) - Position.Y;
+            bool legal = k == _pathIdx
+                ? MathF.Abs(dy) <= MaxRebindDy
+                : dy <= MaxStepUpDy && dy >= -MaxStepDownDy;
+            if (!legal) continue;
             tri = t;
+            return true;
         }
-        return tri >= 0;
+        return false;
     }
 
     static float DistanceToTriangleXZ(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
@@ -283,6 +294,7 @@ public sealed class NavFollower
         Mesh = mesh;
         _path.Clear();
         _waypoints.Clear();
+        _waypointPortals.Clear();
         _pathIdx = 0;
         _waypointIdx = 0;
         CurrentTriangle = -1;
@@ -306,6 +318,7 @@ public sealed class NavFollower
         PathBlocked = false;
         _path.Clear();
         _waypoints.Clear();
+        _waypointPortals.Clear();
         _pathIdx = 0;
         _waypointIdx = 0;
         CurrentTriangle = -1;
@@ -381,6 +394,7 @@ public sealed class NavFollower
     {
         _path.Clear();
         _waypoints.Clear();
+        _waypointPortals.Clear();
         _pathIdx = 0;
         _waypointIdx = 0;
 
@@ -463,7 +477,7 @@ public sealed class NavFollower
         // String-pull the triangle path into a waypoint list. _path stays around because
         // the Y resampler still uses it to figure out which triangle the follower is
         // standing on as it advances through the corridor.
-        NavFunnel.BuildWaypoints(Mesh, _path, Position, Target, _waypoints);
+        NavFunnel.BuildWaypoints(Mesh, _path, Position, Target, _waypoints, _waypointPortals);
 
         CurrentTriangle = startTri;
         // Snap Y to the starting triangle's surface so the first tick doesn't jump.
@@ -615,7 +629,18 @@ public sealed class NavFollower
             float dz = waypoint.Z - Position.Z;
             float distXZ = MathF.Sqrt(dx * dx + dz * dz);
 
-            if (distXZ <= GoalRadius)
+            // SC-NAV-WAYPOINT-LAYER — a waypoint is reached on the path, not
+            // just in plan view: the walker must stand on the triangle before
+            // the waypoint's portal or later. Leaving the farmhouse's upper
+            // floor, the stair-top waypoint was "reached" 0.5u short, still on
+            // the landing beside the stairwell, and so were the next stair
+            // waypoints; the hero turned for the stair foot along the landing,
+            // a floor up, and stuck at its edge. Standing exactly on the spot
+            // counts whatever the layer, so a walker can't stall there.
+            bool onWaypointLayer = _waypointIdx >= _waypointPortals.Count
+                || _pathIdx >= Math.Min(_waypointPortals[_waypointIdx], _path.Count) - 1
+                || distXZ < 0.01f;
+            if (distXZ <= GoalRadius && onWaypointLayer)
             {
                 if (_waypointIdx + 1 >= _waypoints.Count)
                 {
