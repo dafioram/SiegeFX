@@ -96,9 +96,6 @@ public sealed class NavMesh
 
     public bool IsBlocked(int tri) => Blocked is not null && tri >= 0 && tri < Blocked.Length && Blocked[tri];
 
-    /// <summary>SC-DOORS-BLOCK — reset every obstacle mark so the map can be
-    /// re-stamped from live state (door opened, prop destroyed). Cheap:
-    /// one Array.Clear; the caller re-marks everything that still blocks.</summary>
     /// <summary>Every triangle whose XZ bounds may overlap the box, each once,
     /// from the lookup grid: the obstacle stamps used to test all ~50k
     /// triangles for each of ~100 props, re-run on every break (a krug
@@ -141,6 +138,9 @@ public sealed class NavMesh
         BlockedTag[tri] = tag;
     }
 
+    /// <summary>SC-DOORS-BLOCK — reset every obstacle mark so the map can be
+    /// re-stamped from live state (door opened, prop destroyed). Cheap:
+    /// one Array.Clear; the caller re-marks everything that still blocks.</summary>
     public void ClearObstacles()
     {
         if (Blocked is not null) Array.Clear(Blocked);
