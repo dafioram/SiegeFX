@@ -220,43 +220,71 @@ public sealed class NavFollower
         // overlap in plan view (the room floor running under a stair's foot),
         // A*'s order says which one it is moving onto. Picking the one nearest
         // the walker's height instead kept a hero climbing from the room on
-        // the floor under the stair, never stepping onto the treads. A later
-        // triangle must still be a legal step (MaxStepUpDy up, MaxStepDownDy
-        // down); the walker's current one only needs the rebind gate.
+        // the floor under the stair, never stepping onto the treads.
         int end = Math.Min(_pathIdx + PathProbeLookahead, _path.Count - 1);
         for (int k = end; k >= _pathIdx; k--)
         {
-            int t = _path[k];
-            if (t < 0 || t >= Mesh.TriangleCount) continue;
-            var a = Mesh.Vertices[Mesh.Indices[3 * t + 0]];
-            var b = Mesh.Vertices[Mesh.Indices[3 * t + 1]];
-            var c = Mesh.Vertices[Mesh.Indices[3 * t + 2]];
-            bool inside = NavMesh.PointInTriangleXZ(p, a, b, c);
-            // Slack only onto triangles ahead: on the walker's own triangle it
-            // would hold a step that is leaving across a stitched seam's gap
-            // (no floor between the edges) instead of letting it seam-hop.
-            if (!inside && (k == _pathIdx || DistanceToTriangleXZ(p, a, b, c) > PathEdgeSlack)) continue;
-            float dy = Mesh.SampleYOnTriangle(t, p) - Position.Y;
-            bool legal = k == _pathIdx
-                ? MathF.Abs(dy) <= MaxRebindDy
-                : dy <= MaxStepUpDy && dy >= -MaxStepDownDy;
-            if (!legal) continue;
-            if (!inside)
-            {
-                // The slack never takes the walker off the mesh: the step lands
-                // on the triangle's nearest point, nudged inside. (Left where
-                // it fell, a step off a wall or cliff edge stranded the walker:
-                // its next replan found no triangle under it, and wandering
-                // monsters froze there for good.)
-                var q = ClosestPointOnTriangleXZ(p, a, b, c);
-                var centroid = (a + b + c) / 3f;
-                x = q.X + (centroid.X - q.X) * 0.02f;
-                z = q.Z + (centroid.Z - q.Z) * 0.02f;
-            }
+            if (!PathTriangle(k, out int t, out var a, out var b, out var c)) continue;
+            if (!NavMesh.PointInTriangleXZ(p, a, b, c) || !LegalPathStep(k, t, p)) continue;
             tri = t;
             return true;
         }
-        return false;
+        // No path triangle holds the step: the slack takes the nearest one
+        // ahead within PathEdgeSlack. Only then: tried in the same pass as
+        // the containment test, a step well inside the next triangle was
+        // pulled onto a further one that happened to lie within the slack,
+        // a jump forward of up to the slack at every edge the walker crossed
+        // (the hero lurched on open ground, most visibly right after each
+        // move click). Not onto the walker's own triangle: there it would
+        // hold a step that is leaving across a stitched seam's gap (no floor
+        // between the edges) instead of letting it seam-hop.
+        int best = -1;
+        float bestD = PathEdgeSlack;
+        for (int k = _pathIdx + 1; k <= end; k++)
+        {
+            if (!PathTriangle(k, out int t, out var a, out var b, out var c)) continue;
+            float d = DistanceToTriangleXZ(p, a, b, c);
+            if (d > bestD || !LegalPathStep(k, t, p)) continue;
+            bestD = d;
+            best = k;
+        }
+        if (best < 0) return false;
+        {
+            PathTriangle(best, out int t, out var a, out var b, out var c);
+            // The slack never takes the walker off the mesh: the step lands
+            // on the triangle's nearest point, nudged inside. (Left where it
+            // fell, a step off a wall or cliff edge stranded the walker: its
+            // next replan found no triangle under it, and wandering monsters
+            // froze there for good.)
+            var q = ClosestPointOnTriangleXZ(p, a, b, c);
+            var centroid = (a + b + c) / 3f;
+            x = q.X + (centroid.X - q.X) * 0.02f;
+            z = q.Z + (centroid.Z - q.Z) * 0.02f;
+            tri = t;
+            return true;
+        }
+    }
+
+    private bool PathTriangle(int k, out int t, out Vector3 a, out Vector3 b, out Vector3 c)
+    {
+        t = _path[k];
+        a = b = c = default;
+        if (t < 0 || t >= Mesh.TriangleCount) return false;
+        a = Mesh.Vertices[Mesh.Indices[3 * t + 0]];
+        b = Mesh.Vertices[Mesh.Indices[3 * t + 1]];
+        c = Mesh.Vertices[Mesh.Indices[3 * t + 2]];
+        return true;
+    }
+
+    /// <summary>A later path triangle must be a legal step (MaxStepUpDy up,
+    /// MaxStepDownDy down); the walker's current one only needs the rebind
+    /// gate.</summary>
+    private bool LegalPathStep(int k, int t, Vector3 p)
+    {
+        float dy = Mesh.SampleYOnTriangle(t, p) - Position.Y;
+        return k == _pathIdx
+            ? MathF.Abs(dy) <= MaxRebindDy
+            : dy <= MaxStepUpDy && dy >= -MaxStepDownDy;
     }
 
     static Vector3 ClosestPointOnTriangleXZ(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
