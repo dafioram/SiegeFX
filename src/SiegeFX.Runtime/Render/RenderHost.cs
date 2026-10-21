@@ -24338,21 +24338,18 @@ void main()
                     // chase the player as if hostile.
                     if (s.IsPartyMember) continue;
                     // SC-INTEREST-RADIUS — an authored set_interest_radius
-                    // freezes AI beyond the radius from the player (NIS
+                    // calms the AI beyond the radius from the player (NIS
                     // scenes calm the world outside the shot). 0 = off.
+                    // Out there an actor still wanders and fidgets but has
+                    // no quarry: it can't spot or chase anyone. Skipping its
+                    // brain outright froze it in place, and a crowd of krugs
+                    // stood like wax figures until the hero walked up.
+                    bool beyondInterest = false;
                     if (_aiInterestRadius > 0.5f && _playerFollower is not null)
                     {
                         var ird = s.CurrentTransform.Translation - _playerFollower.Position;
-                        if (ird.X * ird.X + ird.Z * ird.Z
-                            > _aiInterestRadius * _aiInterestRadius)
-                        {
-                            // Frozen AI stands still. Left as it was, an actor
-                            // caught mid-stride kept playing its walk cycle on
-                            // the spot until the player came within the radius
-                            // (krugs and chickens "walking in place").
-                            s.IsMoving = false;
-                            continue;
-                        }
+                        beyondInterest = ird.X * ird.X + ird.Z * ird.Z
+                            > _aiInterestRadius * _aiInterestRadius;
                     }
                     // SC-ALIGNMENT — only evil-chain actors hunt the party;
                     // good combatants (guards, kings) never turn on you.
@@ -24372,7 +24369,8 @@ void main()
                     bool goodFighter = !hostile && !s.IsEvilAligned
                         && !s.IsPlayer && !s.IsPartyMember
                         && s.Actor.Stats.IsCombatant && _nisPhase == NisPhase.Off;
-                    var quarry = hostile ? PickBrainQuarry(s)
+                    var quarry = beyondInterest ? null
+                        : hostile ? PickBrainQuarry(s)
                         : goodFighter ? NearestOfRoster(_evilCombatantCache, s)
                         : null;
                     // SC-MONSTER-SPECIALS — startup_reveal dormancy: the
