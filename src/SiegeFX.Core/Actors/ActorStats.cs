@@ -53,6 +53,15 @@ public sealed record ActorStats(
     public float ComRange { get; init; }
     public float ReloadDelay { get; init; }
     public bool  AlertFriends { get; init; }
+    /// <summary>SC-MOB-TRAVEL-LIMIT — [mind] job_travel_distance_limit: how
+    /// far an attack may carry the actor from where it began (actor_evil
+    /// ships 20). Applies only with <see cref="AbortAttackAtTravelLimit"/>.</summary>
+    public float JobTravelDistanceLimit { get; init; }
+    /// <summary>SC-MOB-TRAVEL-LIMIT — [mind]
+    /// on_job_reached_travel_distance_abort_attack: monsters give up an
+    /// attack that has carried them that far (true on actor_evil, false on
+    /// the heroes).</summary>
+    public bool  AbortAttackAtTravelLimit { get; init; }
 
     // SC-MOB-CASTER / SC-MOB-RANGED — attack-mode identity, parameter-driven
     // exactly like DS1's single shared brain skrit: WP_MELEE / WP_RANGED /
@@ -176,6 +185,8 @@ public sealed record ActorStats(
             ComRange          = ParseFloat(store.GetAttribute(template, "mind", "com_range")) ?? 0f,
             ReloadDelay       = ParseFloat(store.GetAttribute(template, "attack", "reload_delay")) ?? 0f,
             AlertFriends      = ParseBool(store.GetAttribute(template, "mind", "on_enemy_spotted_alert_friends")),
+            JobTravelDistanceLimit = ParseFloat(store.GetAttribute(template, "mind", "job_travel_distance_limit")) ?? 0f,
+            AbortAttackAtTravelLimit = ParseBool(store.GetAttribute(template, "mind", "on_job_reached_travel_distance_abort_attack")),
             WeaponPreference  = Clean(store.GetAttribute(template, "mind", "actor_weapon_preference")),
             AutoSwitchToMagic = ParseBool(store.GetAttribute(template, "mind", "actor_auto_switches_to_magic")),
             AutoSwitchToRanged = ParseBool(store.GetAttribute(template, "mind", "actor_auto_switches_to_ranged")),

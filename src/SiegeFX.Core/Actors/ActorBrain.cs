@@ -279,6 +279,8 @@ public sealed class ActorBrain
             AggroRadius = selfStats.SightRange;
             DisengageRadius = MathF.Max(selfStats.SightRange * 1.75f, selfStats.SightRange + 4f);
         }
+        if (selfStats.AbortAttackAtTravelLimit && selfStats.JobTravelDistanceLimit > 0f)
+            TravelDistanceLimit = selfStats.JobTravelDistanceLimit;
         // Phase 18c — [attack] reload_delay is ADDITIVE: DS1's swing period is
         // reload_delay + the stance's base attack-anim duration
         // (job_attack_object_melee.skrit). SwingPeriod survives only as the
@@ -366,6 +368,35 @@ public sealed class ActorBrain
         _attackFacing = null;
         EndCharge();
         _cautiousArmed = false;
+    }
+
+    // SC-MOB-TRAVEL-LIMIT — the original's [mind] job_travel_distance_limit
+    // with on_job_reached_travel_distance_abort_attack (actor_evil: 20u,
+    // true). An attack that has carried a monster that far from where it
+    // began is given up, and the monster walks back to that spot. Without
+    // it a mob that could keep pace chased the hero across the map (the
+    // disengage radius only drops a target that pulls away). While walking
+    // back it ignores the hero, unless the hero hurts it.
+    Vector3 _jobOrigin;
+    bool _wasEngaged;
+    bool _returningToOrigin;
+    bool _tookDamage;
+
+    /// <summary>The authored travel limit (0 = none: heroes, companions,
+    /// templates that don't abort).</summary>
+    public float TravelDistanceLimit { get; set; }
+
+    /// <summary>True while the brain walks back to where its last attack
+    /// began after giving it up at the travel limit.</summary>
+    public bool ReturningToOrigin => _returningToOrigin;
+
+    void AbortAtTravelLimit()
+    {
+        GiveUpChase();
+        _returningToOrigin = true;
+        _tookDamage = false;
+        _wasEngaged = false;
+        Wander.Follower.SetTarget(_jobOrigin);
     }
 
     void EndCharge()
@@ -495,6 +526,12 @@ public sealed class ActorBrain
         // SC-MOB-CHASE-GIVEUP — tick down the post-give-up re-aggro pause.
         if (_reaggroCooldown > 0f) _reaggroCooldown -= dt;
 
+        // SC-MOB-TRAVEL-LIMIT — an attack's travel is measured from where the
+        // brain engaged (Attack<->Chase bounces are the same attack).
+        bool engaged = State == BrainState.Chase || State == BrainState.Attack;
+        if (engaged && !_wasEngaged) _jobOrigin = Wander.Position;
+        _wasEngaged = engaged;
+
         // SC-MOB-CAUTIOUS — taking damage breaks the stalk (authored
         // abort_cautious_on_damage, default true): a wounded wolf stops
         // creeping and commits. Life-delta watch needs no host hook.
@@ -503,6 +540,7 @@ public sealed class ActorBrain
             float lifeNow = _selfActor.Combat.CurrentLife;
             if (_lastSeenLife >= 0f && lifeNow < _lastSeenLife - 0.01f && AbortCautiousOnDamage)
                 _cautiousAborted = true;
+            if (_lastSeenLife >= 0f && lifeNow < _lastSeenLife - 0.01f) _tookDamage = true;
             _lastSeenLife = lifeNow;
         }
 
@@ -525,6 +563,26 @@ public sealed class ActorBrain
         switch (State)
         {
             case BrainState.Wander:
+                // SC-MOB-TRAVEL-LIMIT — walk back to where the given-up attack
+                // began; a blow from the hero ends the walk (the aggro check
+                // below then answers it).
+                if (_returningToOrigin)
+                {
+                    bool home = Wander.Follower.ReachedGoal || Wander.Follower.PathBlocked
+                                || DistXZ(Wander.Position, _jobOrigin) < 1f;
+                    if (_tookDamage || home)
+                    {
+                        _returningToOrigin = false;
+                        if (_tookDamage) _reaggroCooldown = 0f;
+                        _tookDamage = false;
+                    }
+                    else
+                    {
+                        _attackFacing = null;
+                        Wander.TickDriven(dt);
+                        break;
+                    }
+                }
                 // SC-MOB-AGGRO-VERTICAL — the XZ-only distance let mobs spot
                 // the player through floors/ceilings (a surface krug aggroing
                 // at the player in the cellar directly below reads as
@@ -692,6 +750,9 @@ public sealed class ActorBrain
                 if (Wander.Follower.ReachedGoal || tdx * tdx + tdz * tdz > 0.4f * 0.4f)
                     Wander.Follower.SetTarget(chaseGoal);
                 Wander.TickDriven(dt);
+                if (TravelDistanceLimit > 0f
+                    && DistXZ(Wander.Position, _jobOrigin) >= TravelDistanceLimit)
+                { AbortAtTravelLimit(); break; }
                 // SC-MOB-CHASE-GIVEUP — two pin detectors. (1) The follower
                 // says blocked and stays blocked: give up quickly. (2) No
                 // real progress across a window despite an allegedly-open
@@ -1011,6 +1072,8 @@ public sealed class ActorBrain
         // SC-MOB-CHASE-GIVEUP — a packmate's shout doesn't override the
         // post-give-up pause; this brain just proved it can't reach.
         if (_reaggroCooldown > 0f) return;
+        // SC-MOB-TRAVEL-LIMIT — nor a mob walking back from a given-up attack.
+        if (_returningToOrigin) return;
         // Same vertical band as the direct spot — a packmate's shout doesn't
         // carry through a floor.
         if (MathF.Abs(Wander.Position.Y - targetPos.Y) > AggroVerticalBand) return;
@@ -1028,6 +1091,8 @@ public sealed class ActorBrain
     {
         Wander.Teleport(pos);
         State = BrainState.Wander;
+        _returningToOrigin = false;
+        _wasEngaged = false;
         _attackFacing = null;
         _swingCooldown = 0f;
     }
