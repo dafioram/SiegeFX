@@ -113,8 +113,8 @@ static void PrintUsage()
     Console.WriteLine("  siegefx world  layout      <map-tank> <terrain-tank> [root-region]");
     Console.WriteLine("  siegefx templates list     <tank> [--prefix=P] [--tag=T]");
     Console.WriteLine("  siegefx templates show     <tank> <name> [--raw]");
-    Console.WriteLine("  siegefx templates attack-timing <Logic.dsres> <name>   (swing clip lengths, notes, anim_durations)");
     Console.WriteLine("  siegefx templates clip-heights <Logic.dsres> <name>   (posed model height per chore clip)");
+    Console.WriteLine("  siegefx templates attack-timing <Logic.dsres> <name>   (swing clip lengths, notes, anim_durations)");
     Console.WriteLine("  siegefx templates stats    <tank> <name | --prefix=P>");
     Console.WriteLine("  siegefx templates combat   <tank> <attacker> <target> [--duels=N] [--seed=K]");
     Console.WriteLine("  siegefx templates loot     <tank> <name> [--rolls=N] [--seed=K]");
@@ -5888,8 +5888,8 @@ static int DispatchTemplates(string[] a)
     {
         "list"   => CmdTemplatesList(a[1..]),
         "show"   => CmdTemplatesShow(a[1..]),
-        "attack-timing" => CmdTemplatesAttackTiming(a[1..]),
         "clip-heights" => CmdTemplatesClipHeights(a[1..]),
+        "attack-timing" => CmdTemplatesAttackTiming(a[1..]),
         "resolve-textures" => CmdTemplatesResolveTextures(a[1..]),
         "stats"  => CmdTemplatesStats(a[1..]),
         "combat" => CmdTemplatesCombat(a[1..]),
@@ -6296,6 +6296,64 @@ static int CmdTemplatesList(string[] a)
     return 0;
 }
 
+/// <summary>`templates attack-timing` — the numbers behind a template's
+/// swing: the chore_attack skrit, the authored [anim_durations] table, and
+/// for every attack sub-anim at every authored stance its length and the
+/// times of its timing notes (FIRE = the hit, BSWG/ESWG = the swing
+/// window, ATTA = nock). What a swing's on-screen speed and follow-through
+/// are built from, readable without loading a level.</summary>
+static int CmdTemplatesAttackTiming(string[] a)
+{
+    if (a.Length != 2)
+    {
+        Console.Error.WriteLine("usage: siegefx templates attack-timing <Logic.dsres> <template>");
+        Console.Error.WriteLine("       Objects.dsres is read from beside Logic.dsres");
+        return 1;
+    }
+    var objectsPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(a[0])) ?? ".", "Objects.dsres");
+    if (!File.Exists(objectsPath)) { Console.Error.WriteLine($"no Objects.dsres beside {a[0]}"); return 1; }
+    using var logicTank = TankFile.Open(a[0]);
+    using var objectsTank = TankFile.Open(objectsPath);
+    var (store, _) = TemplateStore.LoadFromTank(new TankReader(logicTank));
+    if (!store.TryGet(a[1], out var t) || t is null) { Console.Error.WriteLine($"template '{a[1]}' not found"); return 1; }
+    var resolver = new AssetResolver();
+    resolver.Add(new TankReader(objectsTank), "Objects.dsres");
+    var prefix = store.GetAttribute(t, "body", "chore_dictionary", "chore_prefix")?.Trim().Trim('"');
+    var dict = store.GetSection(t, "body", "chore_dictionary");
+    if (prefix is null || dict is null) { Console.Error.WriteLine("no chore dictionary"); return 1; }
+
+    static string Note(uint tok)
+    {
+        var b = BitConverter.GetBytes(tok);
+        return new string(b.Select(c => c is >= 32 and < 127 ? (char)c : '?').ToArray());
+    }
+    foreach (var name in new[] { "chore_attack", "chore_magic" })
+    {
+        var chore = TemplateStore.FindChild(dict, name);
+        if (chore is null) continue;
+        Console.WriteLine($"[{name}] skrit={TemplateStore.FindAttr(chore, "skrit") ?? "?"} " +
+                          $"stances={TemplateStore.FindAttr(chore, "chore_stances") ?? "?"}");
+        if (TemplateStore.FindChild(chore, "anim_durations") is { } durs)
+            Console.WriteLine("  anim_durations: " + string.Join(", ", durs.Attributes.Select(d => $"{d.Name}={d.Value}")));
+        else
+            Console.WriteLine("  anim_durations: <none>");
+        var anims = TemplateStore.FindChild(chore, "anim_files");
+        if (anims is null) continue;
+        foreach (var st in ParseChoreStances(TemplateStore.FindAttr(chore, "chore_stances")))
+        {
+            foreach (var f in anims.Attributes)
+            {
+                if (!resolver.TryLoadChoreAnim(prefix, st, f.Value, out var bytes)) continue;
+                var clip = PrsAnimation.Load(bytes);
+                var notes = string.Join(" ", clip.Notes.OrderBy(n => n.Time)
+                    .Select(n => $"{Note(n.Token)}@{n.Time * clip.AnimLength:F2}s"));
+                Console.WriteLine($"  fs{st} {f.Name,-5} {prefix}{st}_{f.Value,-8} {clip.AnimLength:F2}s  {notes}");
+            }
+        }
+    }
+    return 0;
+}
+
 /// <summary>`templates clip-heights` — for each clip a template's chores name,
 /// how high the posed model sits at five points through the clip: the
 /// lowest and highest corner overall and per subset (body, mound, ...),
@@ -6379,64 +6437,6 @@ static int CmdTemplatesClipHeights(string[] a)
                 float tt = MathF.Min(clip.AnimLength * frac, MathF.Max(0f, clip.AnimLength - 0.001f));
                 var pos = AnimationRuntime.SkinCorners(mesh, AnimationRuntime.ComputeSkinMatrices(mesh, clip, tt));
                 Console.WriteLine($"  {frac,4:P0} t={tt:F2}s  {Heights(pos)}");
-            }
-        }
-    }
-    return 0;
-}
-
-/// <summary>`templates attack-timing` — the numbers behind a template's
-/// swing: the chore_attack skrit, the authored [anim_durations] table, and
-/// for every attack sub-anim at every authored stance its length and the
-/// times of its timing notes (FIRE = the hit, BSWG/ESWG = the swing
-/// window, ATTA = nock). What a swing's on-screen speed and follow-through
-/// are built from, readable without loading a level.</summary>
-static int CmdTemplatesAttackTiming(string[] a)
-{
-    if (a.Length != 2)
-    {
-        Console.Error.WriteLine("usage: siegefx templates attack-timing <Logic.dsres> <template>");
-        Console.Error.WriteLine("       Objects.dsres is read from beside Logic.dsres");
-        return 1;
-    }
-    var objectsPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(a[0])) ?? ".", "Objects.dsres");
-    if (!File.Exists(objectsPath)) { Console.Error.WriteLine($"no Objects.dsres beside {a[0]}"); return 1; }
-    using var logicTank = TankFile.Open(a[0]);
-    using var objectsTank = TankFile.Open(objectsPath);
-    var (store, _) = TemplateStore.LoadFromTank(new TankReader(logicTank));
-    if (!store.TryGet(a[1], out var t) || t is null) { Console.Error.WriteLine($"template '{a[1]}' not found"); return 1; }
-    var resolver = new AssetResolver();
-    resolver.Add(new TankReader(objectsTank), "Objects.dsres");
-    var prefix = store.GetAttribute(t, "body", "chore_dictionary", "chore_prefix")?.Trim().Trim('"');
-    var dict = store.GetSection(t, "body", "chore_dictionary");
-    if (prefix is null || dict is null) { Console.Error.WriteLine("no chore dictionary"); return 1; }
-
-    static string Note(uint tok)
-    {
-        var b = BitConverter.GetBytes(tok);
-        return new string(b.Select(c => c is >= 32 and < 127 ? (char)c : '?').ToArray());
-    }
-    foreach (var name in new[] { "chore_attack", "chore_magic" })
-    {
-        var chore = TemplateStore.FindChild(dict, name);
-        if (chore is null) continue;
-        Console.WriteLine($"[{name}] skrit={TemplateStore.FindAttr(chore, "skrit") ?? "?"} " +
-                          $"stances={TemplateStore.FindAttr(chore, "chore_stances") ?? "?"}");
-        if (TemplateStore.FindChild(chore, "anim_durations") is { } durs)
-            Console.WriteLine("  anim_durations: " + string.Join(", ", durs.Attributes.Select(d => $"{d.Name}={d.Value}")));
-        else
-            Console.WriteLine("  anim_durations: <none>");
-        var anims = TemplateStore.FindChild(chore, "anim_files");
-        if (anims is null) continue;
-        foreach (var st in ParseChoreStances(TemplateStore.FindAttr(chore, "chore_stances")))
-        {
-            foreach (var f in anims.Attributes)
-            {
-                if (!resolver.TryLoadChoreAnim(prefix, st, f.Value, out var bytes)) continue;
-                var clip = PrsAnimation.Load(bytes);
-                var notes = string.Join(" ", clip.Notes.OrderBy(n => n.Time)
-                    .Select(n => $"{Note(n.Token)}@{n.Time * clip.AnimLength:F2}s"));
-                Console.WriteLine($"  fs{st} {f.Name,-5} {prefix}{st}_{f.Value,-8} {clip.AnimLength:F2}s  {notes}");
             }
         }
     }

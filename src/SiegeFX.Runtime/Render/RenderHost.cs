@@ -403,7 +403,7 @@ public sealed class RenderHost : IDisposable
     // torches actually burn. Carry is the per-source fractional spawn budget.
     // Cleared alongside _staticProps on region teardown.
     private readonly List<FlameSource> _flameSources = new();
-    private sealed class FlameSource { public Vector3 Pos; public float Carry; }
+    private sealed class FlameSource { public Vector3 Pos; public float Carry; public uint Snode; }
 
     // SC-ELEVATOR — levers ([on_off_lever] component) + elevator gizmos from
     // objects/elevator.gas. Levers are static props promoted to clickable:
@@ -16211,7 +16211,7 @@ void main()
                                 continue;
                             var socket = ComposeSocketWorld(asp, bi, p.Placement);
                             if (scale != 1f) socket = Matrix4x4.CreateScale(scale) * socket;
-                            _flameSources.Add(new FlameSource { Pos = socket.Translation });
+                            _flameSources.Add(new FlameSource { Pos = socket.Translation, Snode = p.Placement.NodeGuid });
                         }
                     }
                     spawned++;
@@ -20653,6 +20653,7 @@ void main()
             if (m.PartyIndex == 0) continue;
             Place(m, m.Brain?.Wander?.Follower);
         }
+        foreach (var seg in sw.Segments) CarryRiders(seg.Riders);
     }
 
     /// <summary>Write a stair segment's pose into its render instance (guid
@@ -20729,6 +20730,34 @@ void main()
             if (OnCar(m.Brain?.Wander?.Follower, m.CurrentTransform.Translation))
                 el.Riders.Add(m);
         }
+        CarryRiders(el.Riders);
+    }
+
+    private SiegeFX.Core.Nav.NavFollower? RiderFollower(ActorRenderState r) =>
+        ReferenceEquals(r, _player) ? _playerFollower : r.Brain?.Wander?.Follower;
+
+    /// <summary>SC-ELEVATOR-RIDE — riders stop walking for the ride: the mesh
+    /// holds the car at the stop it left until the car arrives (see
+    /// <see cref="SiegeFX.Core.Nav.NavFollower.Carried"/>).</summary>
+    private void CarryRiders(IEnumerable<ActorRenderState> riders)
+    {
+        foreach (var r in riders)
+            if (RiderFollower(r) is { } f) f.Carried = true;
+    }
+
+    /// <summary>SC-ELEVATOR-RIDE — the car has arrived: riders walk again.
+    /// Returns the move order the player gave during the ride, to replay on
+    /// the rebuilt mesh.</summary>
+    private Vector3? ReleaseRiders(IEnumerable<ActorRenderState> riders)
+    {
+        Vector3? playerHeld = null;
+        foreach (var r in riders)
+        {
+            if (RiderFollower(r) is not { } f) continue;
+            if (ReferenceEquals(r, _player)) playerHeld = f.HeldTarget;
+            f.Carried = false;
+        }
+        return playerHeld;
     }
 
     /// <summary>we_req_activate at an elevator gizmo scid — start the ride
@@ -21757,6 +21786,7 @@ void main()
                 var final = el.AtStop == 1 ? el.Stop1 : el.Stop2;
                 UpdateElevatorCarInstance(el, final);
                 _elevatorNodeOverrides[el.Def.CarNodeGuid] = final;
+                var heldOrder = ReleaseRiders(el.Riders);
                 // Re-bake nav so the car floor welds into the arrival stop and
                 // riders can walk off. Same swap pattern as region streaming.
                 var nav = RebuildNavMesh();
@@ -21796,6 +21826,7 @@ void main()
                     RescueOffMeshAfterRebuild(nav);
                 }
                 el.Riders.Clear();
+                if (heldOrder is { } ho) _playerFollower?.SetTarget(ho);
                 Console.WriteLine($"[elevator] 0x{el.Def.Scid:X8} arrived at stop{el.AtStop}");
             }
         }
@@ -21843,6 +21874,8 @@ void main()
                     // any node-anchored placements see the new configuration.
                     _elevatorNodeOverrides[seg.NodeGuid] = final;
                 }
+                Vector3? swHeld = null;
+                foreach (var seg in sw.Segments) swHeld = ReleaseRiders(seg.Riders) ?? swHeld;
                 var nav = RebuildNavMesh();
                 if (nav is not null)
                 {
@@ -21871,6 +21904,7 @@ void main()
                     RescueOffMeshAfterRebuild(nav);
                 }
                 foreach (var seg in sw.Segments) seg.Riders.Clear();
+                if (swHeld is { } sh) _playerFollower?.SetTarget(sh);
                 Console.WriteLine($"[stairwell] 0x{sw.Def.Scid:X8} parked {(sw.AtDown ? "DOWN" : "UP")} — nav rebaked");
             }
         }
@@ -24549,21 +24583,18 @@ void main()
                     // chase the player as if hostile.
                     if (s.IsPartyMember) continue;
                     // SC-INTEREST-RADIUS — an authored set_interest_radius
-                    // freezes AI beyond the radius from the player (NIS
+                    // calms the AI beyond the radius from the player (NIS
                     // scenes calm the world outside the shot). 0 = off.
+                    // Out there an actor still wanders and fidgets but has
+                    // no quarry: it can't spot or chase anyone. Skipping its
+                    // brain outright froze it in place, and a crowd of krugs
+                    // stood like wax figures until the hero walked up.
+                    bool beyondInterest = false;
                     if (_aiInterestRadius > 0.5f && _playerFollower is not null)
                     {
                         var ird = s.CurrentTransform.Translation - _playerFollower.Position;
-                        if (ird.X * ird.X + ird.Z * ird.Z
-                            > _aiInterestRadius * _aiInterestRadius)
-                        {
-                            // Frozen AI stands still. Left as it was, an actor
-                            // caught mid-stride kept playing its walk cycle on
-                            // the spot until the player came within the radius
-                            // (krugs and chickens "walking in place").
-                            s.IsMoving = false;
-                            continue;
-                        }
+                        beyondInterest = ird.X * ird.X + ird.Z * ird.Z
+                            > _aiInterestRadius * _aiInterestRadius;
                     }
                     // SC-ALIGNMENT — only evil-chain actors hunt the party;
                     // good combatants (guards, kings) never turn on you.
@@ -24583,7 +24614,8 @@ void main()
                     bool goodFighter = !hostile && !s.IsEvilAligned
                         && !s.IsPlayer && !s.IsPartyMember
                         && s.Actor.Stats.IsCombatant && _nisPhase == NisPhase.Off;
-                    var quarry = hostile ? PickBrainQuarry(s)
+                    var quarry = beyondInterest ? null
+                        : hostile ? PickBrainQuarry(s)
                         : goodFighter ? NearestOfRoster(_evilCombatantCache, s)
                         : null;
                     // SC-MONSTER-SPECIALS — startup_reveal dormancy: the
@@ -30470,6 +30502,17 @@ void main()
         _playerCast = null;
         _player?.Actor.Host.OverrideAnimIndex(-1, 0f);
     }
+
+    /// <summary>An attack or cast replaces the hero's walk: the hero stops
+    /// where it stands to swing or cast, as the original's attack order
+    /// replaces its move order. Without this, attacking an enemy already in
+    /// reach (a click, a right-click cast) left the earlier move order
+    /// running, and the hero slid across the ground mid-swing.</summary>
+    private void HaltPlayerWalk()
+    {
+        if (_playerFollower is not { ReachedGoal: false } f) return;
+        f.SetTarget(f.Position);
+    }
     // SC-CAST-APPROACH — pending walk-up-and-cast latch: clicking an enemy
     // (or breakable) beyond the active spell's CastRange runs the hero into
     // range and re-initiates the cast, mirroring the melee/bow walk-up
@@ -35054,6 +35097,7 @@ void main()
             ? _playerSpellbook.PrimaryCooldownRemaining
             : _playerSpellbook.SecondaryCooldownRemaining;
         if (cd > 0f) return;
+        HaltPlayerWalk();
         if (best is not null) SnapPlayerFacingTo(best.CurrentTransform.Translation);
         else if (prop is not null) SnapPlayerFacingTo(prop.World.Translation);
         // No target for an offensive spell → immediate release so the
@@ -35187,6 +35231,7 @@ void main()
         float elev = target is not null
             ? target.CurrentTransform.Translation.Y - _player!.CurrentTransform.Translation.Y
             : 0f;
+        HaltPlayerWalk();
         var clip = _player!.Actor.PickNextSwingClip(elev);
         Console.WriteLine($"[swing] hero {(_weaponIsRanged ? "bow" : "melee")} at " +
                           $"{target?.Actor.Template.Name ?? (prop is not null ? "a prop" : "nothing")}");
@@ -38887,6 +38932,10 @@ void main()
             foreach (var f in _flameSources)
             {
                 if (Vector3.DistanceSquared(f.Pos, camPos) > 60f * 60f) continue;
+                // A torch in a faded-out room goes dark with it (its sconce
+                // is hidden): flames used to hang in the black over a
+                // faded floor (the elevator in Edgaar's basement).
+                if (_fadedSnodeCounts.ContainsKey(f.Snode)) continue;
                 f.Carry = _particles.MaintainFire(f.Pos, flameCol, 0.22f, simDt, 18f, f.Carry);
             }
         }
