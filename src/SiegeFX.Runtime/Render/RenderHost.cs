@@ -8814,12 +8814,20 @@ public sealed class RenderHost : IDisposable
     /// float.MaxValue when clear. AABB-rejects per node, then Möller–Trumbore
     /// per triangle.</summary>
     private float CameraBoundsHitDistance(Vector3 origin, Vector3 dir, float maxDist)
+        => TerrainHitDistance(origin, dir, maxDist, boundsOnly: true);
+
+    /// <summary>Nearest hit of a ray against the drawn terrain geometry,
+    /// skipping layers hidden above the player and faded-out nodes. With
+    /// <paramref name="boundsOnly"/> only camera-blocking nodes count (see
+    /// <see cref="CameraBoundsHitDistance"/>); without it, every visible
+    /// node does (what the cursor is actually on).</summary>
+    private float TerrainHitDistance(Vector3 origin, Vector3 dir, float maxDist, bool boundsOnly)
     {
         float best = float.MaxValue;
         foreach (var (inv, _, sno, guid, blocksFlag, regionPath) in _drapeNodes)
         {
             bool blocks = _boundsCameraOverrides.TryGetValue(guid, out var ov) ? ov : blocksFlag;
-            if (!blocks) continue;
+            if (boundsOnly && !blocks) continue;
             // SC-CAM-OCCLUDES-FIX — a region hidden as an upper layer
             // (player underground beneath it) is invisible, so it must not
             // block the camera either: the surface terrain stacked above a
@@ -29558,6 +29566,34 @@ void main()
             {
                 float tPlane = (_playerFollower.Position.Y - near.Y) / dir.Y;
                 if (tPlane >= 0f && TryClickPickupAt(near + dir * tPlane)) return;
+            }
+            // SC-CLICK-SAME-FLOOR — an upper floor's walk mesh stops short of
+            // its walls, so a click into a corner or by a window missed it and
+            // the ray went on to the floor below: from the upper floor of the
+            // farmhouse with the breakable door, the hero walked down the
+            // stairs and back up toward the spot. When the nav hit lands more
+            // than a storey below the hero but the first drawn surface the ray
+            // meets is at the hero's floor height (that floor, or the foot of
+            // its wall), the click means that floor: the walker goes to the
+            // nearest walkable point on it. A click on the yard below hits the
+            // yard first and still goes to the yard.
+            float floorY = _playerFollower.Position.Y;
+            if (hit.Y < floorY - 1.5f)
+            {
+                // What the cursor is on: the first drawn surface along the ray.
+                var rayDir = Vector3.Normalize(dir);
+                float tGeo = TerrainHitDistance(near, rayDir, dir.Length(), boundsOnly: false);
+                if (tGeo < float.MaxValue)
+                {
+                    var onGeo = near + rayDir * tGeo;
+                    if (MathF.Abs(onGeo.Y - floorY) <= 1f
+                        && _navMesh.TryFindNearestEnterable(onGeo with { Y = floorY }, 1.5f, 1f,
+                               SiegeFX.Core.Nav.NavTraversal.Player, out var floorTri, out var floorHit))
+                    {
+                        tri = floorTri;
+                        hit = floorHit;
+                    }
+                }
             }
         }
         hit = hit with { Y = _navMesh.SampleYOnTriangle(tri, hit) };
