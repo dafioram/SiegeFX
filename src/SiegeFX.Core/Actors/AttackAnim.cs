@@ -115,16 +115,49 @@ public sealed class SwingSchedule
     bool _swingSfxFired;
     bool _padStarted;
 
+    /// <summary>Playback rate of the swing clip: 1, or clip length ÷ attack
+    /// time when the clip is too long to fit (select_attack.skrit plays it
+    /// faster so the swing ends on time).</summary>
+    public float TimeScale { get; }
+
+    /// <summary>Seconds of real time the swing clip takes at <see cref="TimeScale"/>.</summary>
+    public float PlayLength => ClipLength / TimeScale;
+
+    /// <summary>The fade into the swing: min(0.10s, a quarter of the clip).</summary>
+    public float FadeIn { get; }
+
+    /// <summary>The fade from the end of the swing into the fighting fidget:
+    /// min(0.2s, half the spare time). 0 when the swing fills the attack time.</summary>
+    public float PadFade { get; }
+
+    /// <summary>select_attack.skrit's timing: the attack time is the weapon's
+    /// reload delay plus the stance's base duration (<paramref name="period"/>).
+    /// A clip shorter than that (less the fade-in) plays at its own speed and
+    /// the rest is the fighting fidget; a longer one is sped up to fit
+    /// exactly, with no fidget. The iteration ends when the attack time has
+    /// passed.</summary>
     public SwingSchedule(Assets.PrsAnimation clip, float period)
     {
         Clip = clip;
         ClipLength = clip.AnimLength > 0f ? clip.AnimLength : 0.6f;
-        Period = MathF.Max(period, ClipLength);
+        float requested = period > 0f ? period : ClipLength;
+        FadeIn = MathF.Min(0.10f, ClipLength * 0.25f);
+        if (ClipLength < requested - FadeIn)
+        {
+            TimeScale = 1f;
+            PadFade = MathF.Min(0.2f, (requested - FadeIn - ClipLength) * 0.5f);
+        }
+        else
+        {
+            TimeScale = ClipLength / requested;
+            PadFade = 0f;
+        }
+        Period = requested;
         var fires = AnimNotes.Times(clip, AnimNotes.Fire);
         // Missing-FIRE fallback: land the hit at clip end.
-        _fireTimes = fires.Length > 0 ? fires : new[] { ClipLength };
+        _fireTimes = (fires.Length > 0 ? fires : new[] { ClipLength }).Select(t => t / TimeScale).ToArray();
         var bswg = AnimNotes.Times(clip, AnimNotes.BeginSwing);
-        _swingSfxTime = bswg.Length > 0 ? bswg[0] : 0f;
+        _swingSfxTime = (bswg.Length > 0 ? bswg[0] : 0f) / TimeScale;
     }
 
     public bool Complete => Elapsed >= Period;
@@ -150,7 +183,7 @@ public sealed class SwingSchedule
             fires++;
         }
         startPad = false;
-        if (!_padStarted && prev < ClipLength && Elapsed >= ClipLength && Period > ClipLength + 0.2f)
+        if (!_padStarted && PadFade > 0f && prev < PlayLength && Elapsed >= PlayLength)
         {
             _padStarted = true;
             startPad = true;
