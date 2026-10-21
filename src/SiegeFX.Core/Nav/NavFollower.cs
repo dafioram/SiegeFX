@@ -68,6 +68,8 @@ public sealed class NavFollower
 
     private readonly List<int> _path = new();
     private readonly List<Vector3> _waypoints = new();
+    // Each waypoint's portal index along _path (NavFunnel.BuildWaypoints).
+    private readonly List<int> _waypointPortals = new();
     private readonly NavPathfinder.Workspace _workspace = new();
     private int _pathIdx;
     private int _waypointIdx;
@@ -124,6 +126,23 @@ public sealed class NavFollower
     // are ungated (the ±MaxRebindDy probe already bounds them).
     private const float MaxStepDownDy = 1.0f;
 
+    // SC-NAV-STEP-UP-GATE — the largest climb a moving step may take when it
+    // binds off its path (the path's own triangles were chosen by A* and are
+    // exempt). Matches MaxStepDownDy: a stair's top step can be ~0.9u where
+    // the nav mesh drops a tread (the farmhouse stair), while stacked floors
+    // are 1.4u+ apart. Field case: the farmhouse stair's last leg hugs its
+    // south edge, which lies under the upper floor; a step a hair off the
+    // stair bound to the upper floor 1.4u up (nearer in height than the room
+    // 1.8u down), the hero "arrived" at the stair foot standing upstairs,
+    // and stuck against the post there.
+    private const float MaxStepUpDy = 1.0f;
+
+    // SC-NAV-PATH-SLACK — a step landing this close (XZ) outside one of the
+    // next path triangles still stands on it: a leg pulled tight along a
+    // corridor edge stays on the layer A* chose instead of falling to the
+    // general probe over a float hair.
+    private const float PathEdgeSlack = 0.25f;
+
     // SC-NAV-SEAM-HOP — door-stitched seams (NavMesh.StitchSnoDoorSeams) wire
     // A* adjacency between boundary edges up to DoorSeamEdgePairDistance
     // (1.5u) apart WITHOUT any covering geometry: the strip between the two
@@ -151,16 +170,110 @@ public sealed class NavFollower
     /// over a stream bed converging at the banks), so a walker's Y can't
     /// flicker onto the other layer mid-stride and read as "dipping into
     /// the ground".</summary>
-    private bool TryFindStandTriangle(Vector3 pos, out int tri)
+    private bool TryFindStandTriangle(Vector3 pos, out int tri, bool stepping = false)
     {
         // SC-NAV-KIND-BIND — pass the walker's traversal so candidates it
         // can't traverse (Water for LandOnly) rank below every legal layer;
         // see TryFindTriangleNear for the bridge-bank flip this prevents.
+        // A moving step climbs at most MaxStepUpDy (SC-NAV-STEP-UP-GATE).
         if (Mesh.TryFindTriangleNear(pos, CurrentTriangle, MaxRebindDy,
-                includeFadeHidden: true, out tri, Traversal))
+                includeFadeHidden: true, out tri, Traversal,
+                stepping ? MaxStepUpDy : float.PositiveInfinity))
             return true;
         tri = -1;
         return false;
+    }
+
+    /// <summary>How many path triangles past the current one the stand probe
+    /// tries first (a 50ms sub-step crosses at most a few).</summary>
+    private const int PathProbeLookahead = 6;
+
+    /// <summary>SC-NAV-PATH-LAYER — the stand probe tries the walker's own
+    /// path triangles first. Where floors overlap in plan view (a stair
+    /// running over or beside the room below it, a landing above the
+    /// stairwell), the general probe ranks candidates by mesh adjacency
+    /// and height and could bind the step to the floor under the stair;
+    /// the step-down gate then refused that drop and the hero held at the
+    /// stair top replanning forever (field log: a farmhouse stair, every
+    /// path down from the upper floor pinned at the same corner). A* has
+    /// already chosen the layer, so a point on one of the next path
+    /// triangles stands there. Same height gate as the general probe.</summary>
+    private bool TryFindPathStandTriangle(ref float x, ref float z, out int tri)
+    {
+        tri = -1;
+        if (_path.Count == 0 || _pathIdx < 0) return false;
+        var p = new Vector3(x, Position.Y, z);
+        // Furthest along the path first: where the walker's own path triangles
+        // overlap in plan view (the room floor running under a stair's foot),
+        // A*'s order says which one it is moving onto. Picking the one nearest
+        // the walker's height instead kept a hero climbing from the room on
+        // the floor under the stair, never stepping onto the treads. A later
+        // triangle must still be a legal step (MaxStepUpDy up, MaxStepDownDy
+        // down); the walker's current one only needs the rebind gate.
+        int end = Math.Min(_pathIdx + PathProbeLookahead, _path.Count - 1);
+        for (int k = end; k >= _pathIdx; k--)
+        {
+            int t = _path[k];
+            if (t < 0 || t >= Mesh.TriangleCount) continue;
+            var a = Mesh.Vertices[Mesh.Indices[3 * t + 0]];
+            var b = Mesh.Vertices[Mesh.Indices[3 * t + 1]];
+            var c = Mesh.Vertices[Mesh.Indices[3 * t + 2]];
+            bool inside = NavMesh.PointInTriangleXZ(p, a, b, c);
+            // Slack only onto triangles ahead: on the walker's own triangle it
+            // would hold a step that is leaving across a stitched seam's gap
+            // (no floor between the edges) instead of letting it seam-hop.
+            if (!inside && (k == _pathIdx || DistanceToTriangleXZ(p, a, b, c) > PathEdgeSlack)) continue;
+            float dy = Mesh.SampleYOnTriangle(t, p) - Position.Y;
+            bool legal = k == _pathIdx
+                ? MathF.Abs(dy) <= MaxRebindDy
+                : dy <= MaxStepUpDy && dy >= -MaxStepDownDy;
+            if (!legal) continue;
+            if (!inside)
+            {
+                // The slack never takes the walker off the mesh: the step lands
+                // on the triangle's nearest point, nudged inside. (Left where
+                // it fell, a step off a wall or cliff edge stranded the walker:
+                // its next replan found no triangle under it, and wandering
+                // monsters froze there for good.)
+                var q = ClosestPointOnTriangleXZ(p, a, b, c);
+                var centroid = (a + b + c) / 3f;
+                x = q.X + (centroid.X - q.X) * 0.02f;
+                z = q.Z + (centroid.Z - q.Z) * 0.02f;
+            }
+            tri = t;
+            return true;
+        }
+        return false;
+    }
+
+    static Vector3 ClosestPointOnTriangleXZ(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+    {
+        Vector3 best = a;
+        float bestD = float.PositiveInfinity;
+        void Seg(Vector3 u, Vector3 v)
+        {
+            float ex = v.X - u.X, ez = v.Z - u.Z;
+            float len2 = ex * ex + ez * ez;
+            float t = len2 > 1e-12f ? Math.Clamp(((p.X - u.X) * ex + (p.Z - u.Z) * ez) / len2, 0f, 1f) : 0f;
+            var q = u + (v - u) * t;
+            float d = (p.X - q.X) * (p.X - q.X) + (p.Z - q.Z) * (p.Z - q.Z);
+            if (d < bestD) { bestD = d; best = q; }
+        }
+        Seg(a, b); Seg(b, c); Seg(c, a);
+        return best;
+    }
+
+    static float DistanceToTriangleXZ(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+    {
+        static float Seg(Vector3 p, Vector3 u, Vector3 v)
+        {
+            float ex = v.X - u.X, ez = v.Z - u.Z;
+            float len2 = ex * ex + ez * ez;
+            float t = len2 > 1e-12f ? Math.Clamp(((p.X - u.X) * ex + (p.Z - u.Z) * ez) / len2, 0f, 1f) : 0f;
+            float dx = p.X - (u.X + ex * t), dz = p.Z - (u.Z + ez * t);
+            return MathF.Sqrt(dx * dx + dz * dz);
+        }
+        return MathF.Min(Seg(p, a, b), MathF.Min(Seg(p, b, c), Seg(p, c, a)));
     }
 
     /// <summary>Per-actor traversal policy: which kinds (Floor / Water) the follower can
@@ -215,6 +328,7 @@ public sealed class NavFollower
         Mesh = mesh;
         _path.Clear();
         _waypoints.Clear();
+        _waypointPortals.Clear();
         _pathIdx = 0;
         _waypointIdx = 0;
         CurrentTriangle = -1;
@@ -238,6 +352,7 @@ public sealed class NavFollower
         PathBlocked = false;
         _path.Clear();
         _waypoints.Clear();
+        _waypointPortals.Clear();
         _pathIdx = 0;
         _waypointIdx = 0;
         CurrentTriangle = -1;
@@ -313,6 +428,7 @@ public sealed class NavFollower
     {
         _path.Clear();
         _waypoints.Clear();
+        _waypointPortals.Clear();
         _pathIdx = 0;
         _waypointIdx = 0;
 
@@ -395,7 +511,7 @@ public sealed class NavFollower
         // String-pull the triangle path into a waypoint list. _path stays around because
         // the Y resampler still uses it to figure out which triangle the follower is
         // standing on as it advances through the corridor.
-        NavFunnel.BuildWaypoints(Mesh, _path, Position, Target, _waypoints);
+        NavFunnel.BuildWaypoints(Mesh, _path, Position, Target, _waypoints, _waypointPortals);
 
         CurrentTriangle = startTri;
         // Snap Y to the starting triangle's surface so the first tick doesn't jump.
@@ -479,7 +595,7 @@ public sealed class NavFollower
                                 Position.X + ex * EscapeStepDist,
                                 Position.Y,
                                 Position.Z + ez * EscapeStepDist);
-                            if (TryFindStandTriangle(escape, out var escapeTri))
+                            if (TryFindStandTriangle(escape, out var escapeTri, stepping: true))
                             {
                                 if (DiagnosticLogging)
                                 {
@@ -547,7 +663,18 @@ public sealed class NavFollower
             float dz = waypoint.Z - Position.Z;
             float distXZ = MathF.Sqrt(dx * dx + dz * dz);
 
-            if (distXZ <= GoalRadius)
+            // SC-NAV-WAYPOINT-LAYER — a waypoint is reached on the path, not
+            // just in plan view: the walker must stand on the triangle before
+            // the waypoint's portal or later. Leaving the farmhouse's upper
+            // floor, the stair-top waypoint was "reached" 0.5u short, still on
+            // the landing beside the stairwell, and so were the next stair
+            // waypoints; the hero turned for the stair foot along the landing,
+            // a floor up, and stuck at its edge. Standing exactly on the spot
+            // counts whatever the layer, so a walker can't stall there.
+            bool onWaypointLayer = _waypointIdx >= _waypointPortals.Count
+                || _pathIdx >= Math.Min(_waypointPortals[_waypointIdx], _path.Count) - 1
+                || distXZ < 0.01f;
+            if (distXZ <= GoalRadius && onWaypointLayer)
             {
                 if (_waypointIdx + 1 >= _waypoints.Count)
                 {
@@ -579,7 +706,8 @@ public sealed class NavFollower
             // SC-NAV-VERTICAL-REBIND — the probe is Y-gated; a hit on a
             // vertically unrelated overlapping surface counts as off-mesh
             // and flows into the swept clamp below instead of being walked.
-            bool onMesh = TryFindStandTriangle(new Vector3(nx, Position.Y, nz), out var hit);
+            bool onMesh = TryFindPathStandTriangle(ref nx, ref nz, out var hit)
+                          || TryFindStandTriangle(new Vector3(nx, Position.Y, nz), out hit, stepping: true);
             if (onMesh)
             {
                 if (hit == _path[_pathIdx])
@@ -667,7 +795,7 @@ public sealed class NavFollower
                     float mid = (lo + hi) * 0.5f;
                     float tx = Position.X + (nx - Position.X) * mid;
                     float tz = Position.Z + (nz - Position.Z) * mid;
-                    if (TryFindStandTriangle(new Vector3(tx, Position.Y, tz), out var thit))
+                    if (TryFindStandTriangle(new Vector3(tx, Position.Y, tz), out var thit, stepping: true))
                     { lo = mid; standing = thit; }
                     else hi = mid;
                 }
