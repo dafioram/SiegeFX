@@ -1897,7 +1897,7 @@ public sealed class RenderHost : IDisposable
             _actorMeshBounds[mesh] = b;
         }
         float scale = s.Actor.Stats.RenderScale > 0f ? s.Actor.Stats.RenderScale : 1f;
-        // Bind poses are authored Z-up or Y-up; centre the sphere on the body
+        // Bind poses are authored Z-up or Y-up; center the sphere on the body
         // height-wise either way and let the radius cover the rest.
         var center = s.CurrentTransform.Translation + new Vector3(0f, b.Radius * scale * 0.5f, 0f);
         return frustum.IntersectsSphere(center, (b.Radius * 1.5f + 1f) * scale);
@@ -8820,7 +8820,7 @@ public sealed class RenderHost : IDisposable
     // SC-CAMERA-FOLLOW — the original's camera trails the hero instead of
     // locking to him: running, the hero pulls ahead of the screen-track
     // point and the camera eases after him (a recording of the original:
-    // up to ~100px off centre at 1280x720, settling back as he slows).
+    // up to ~100px off center at 1280x720, settling back as he slows).
     // The focus point the camera aims at eases toward the hero's tracking
     // point with this time constant, fitted to that recording (an
     // exponential follow at 0.45s halves the error of a locked camera;
@@ -8830,7 +8830,7 @@ public sealed class RenderHost : IDisposable
     private Vector3 _camFocus;
     private bool _camFocusInit;
     // Dev console: lock the camera to the hero again (the pre-follow
-    // behaviour, useful for spotting hitches in the hero's own motion).
+    // behavior, useful for spotting hitches in the hero's own motion).
     private bool _camFollowLocked;
 
     // SC-CAMERA-BOUNDS — dynamic constraint state: how long the view ray has
@@ -24420,8 +24420,8 @@ void main()
         UpdateSubtitles((float)dt);
         // SC-CAMERA-GAS — the game camera keeps its tracking point where
         // [camera_settings] camera_x/y_screen_track put it (the hero a little
-        // below centre); cutscenes, the map overview, the fly and dev cameras
-        // stay centred.
+        // below center); cutscenes, the map overview, the fly and dev cameras
+        // stay centered.
         _camera.ScreenTrack = _cameraMode == CameraMode.Chase && _player is not null
             && _nisPhase == NisPhase.Off && !_megaMapActive && !_devFreeCamera
             ? new Vector2(_camScreenTrackX, _camScreenTrackY) : Vector2.Zero;

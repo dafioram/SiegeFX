@@ -25,7 +25,7 @@ public class FrustumTests
     [Fact]
     public void KeepsASphereStraddlingTheEdge()
     {
-        // tan(30°)·10 ≈ 5.77 is the top edge at 10u; a sphere centred just
+        // tan(30°)·10 ≈ 5.77 is the top edge at 10u; a sphere centered just
         // above it still reaches into view.
         Assert.True(F.IntersectsSphere(new Vector3(0f, 6.2f, -10f), 1f));
         Assert.False(F.IntersectsSphere(new Vector3(0f, 8f, -10f), 1f));

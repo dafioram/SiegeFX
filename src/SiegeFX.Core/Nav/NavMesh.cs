@@ -251,13 +251,13 @@ public sealed class NavMesh
     /// <summary>How far above its base a prop blocks: the ground it stands on,
     /// with room for slope under the footprint. Up to its top (+0.5) the old
     /// band let a 1.4u cart beside a farmhouse block the house floor and
-    /// stair raised a metre above it on the far side of the wall.</summary>
+    /// stair raised a meter above it on the far side of the wall.</summary>
     private const float ObstacleAboveBaseTol = 0.9f;
 
     /// <summary>Top of the vertical band a rectangle obstacle blocks: 0.9u
     /// above its base, and never above its own top (+0.5). Disc obstacles
     /// (long fences, big wagons) keep the top-based band: their single
-    /// centre base would leave a hillside fence's uphill end unblocked.</summary>
+    /// center base would leave a hillside fence's uphill end unblocked.</summary>
     private static float ObstacleBandTop(float baseY, float topY) =>
         float.IsFinite(baseY)
             ? MathF.Min(topY + ObstacleAboveTopTol, baseY + ObstacleAboveBaseTol)
@@ -425,7 +425,7 @@ public sealed class NavMesh
             var la = Local(a); var lb = Local(b); var lc = Local(c);
             float depth = MathF.Max(InsideLength(la, lb), MathF.Max(InsideLength(lb, lc), InsideLength(lc, la)));
             if (depth < ObstacleRectEdgeDepth) continue;
-            // ...and only a triangle that lies mostly in it: its centre within
+            // ...and only a triangle that lies mostly in it: its center within
             // ObstacleRectEdgeReach of the footprint. A sliver merely clipping
             // a corner (the farmhouse stair foot) stays walkable.
             var cc = Local(Centroids[t]);
@@ -452,7 +452,7 @@ public sealed class NavMesh
     public const float ObstacleRectEdgeDepth = 0.4f;
 
     /// <summary>How far outside a rectangle obstacle's footprint a small
-    /// triangle's centre may lie and still be sealed by an edge crossing.</summary>
+    /// triangle's center may lie and still be sealed by an edge crossing.</summary>
     public const float ObstacleRectEdgeReach = 0.3f;
 
     /// <summary>SC-NAV-EDGE-SEAL-AREA — largest XZ triangle area (m²) the

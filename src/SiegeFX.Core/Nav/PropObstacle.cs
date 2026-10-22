@@ -9,7 +9,7 @@ namespace SiegeFX.Core.Nav;
 public readonly record struct PropFootprint(
     Vector3 Corner, Vector3 AxisU, float LenU, Vector3 AxisV, float LenV, float BaseY, float TopY)
 {
-    /// <summary>Centre of the rectangle in XZ.</summary>
+    /// <summary>Center of the rectangle in XZ.</summary>
     public Vector2 Center => new(Corner.X + (AxisU.X * LenU + AxisV.X * LenV) * 0.5f,
                                  Corner.Z + (AxisU.Z * LenU + AxisV.Z * LenV) * 0.5f);
 
@@ -44,7 +44,7 @@ public readonly record struct PropFootprint(
         var flatV = new Vector3(edge[iv].X, 0f, edge[iv].Z);
         float lenU = flatU.Length(), lenV = flatV.Length();
         // A box edge running backwards along its world axis still spans the
-        // same rectangle from the same corner; normalising keeps the sign.
+        // same rectangle from the same corner; normalizing keeps the sign.
         var axisU = lenU > 1e-6f ? flatU / lenU : Vector3.UnitX;
         var axisV = lenV > 1e-6f ? flatV / lenV : Vector3.UnitZ;
         float baseY = float.PositiveInfinity, topY = float.NegativeInfinity;
@@ -76,7 +76,7 @@ public static class PropObstacle
 
     /// <summary>Marks <paramref name="f"/> on <paramref name="mesh"/> and
     /// returns the number of triangles it blocked. Blame tags carry the
-    /// prop's tag and its footprint centre. Tall props add their discs to
+    /// prop's tag and its footprint center. Tall props add their discs to
     /// <paramref name="sightOccluders"/> when given.</summary>
     public static int Mark(NavMesh mesh, in PropFootprint f, string tag,
                            List<(Vector2 C, float R, float TopY)>? sightOccluders = null)

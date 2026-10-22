@@ -30,9 +30,9 @@ public sealed class Camera
     public Vector3 ShakeOffset { get; set; }
 
     /// <summary>Where on screen the look target sits, in normalized device
-    /// coordinates (0,0 = centre, -1..1 across). The game camera authors
+    /// coordinates (0,0 = center, -1..1 across). The game camera authors
     /// <c>camera_y_screen_track = -0.12</c>: the hero rides a little below
-    /// centre, so more of the ground ahead is in view. The projection is
+    /// center, so more of the ground ahead is in view. The projection is
     /// shifted, so drawing and click picking (both through
     /// <see cref="GetViewProjection"/>) agree.</summary>
     public Vector2 ScreenTrack { get; set; }
