@@ -1827,6 +1827,8 @@ public sealed class RenderHost : IDisposable
     // (50 ms) behind sim, which is invisible at this cadence.
     private Vector3 _playerRenderPosPrev;
     private Vector3 _playerRenderPosNext;
+    private float _playerRenderY;
+    private bool _playerRenderYInit;
     private Vector3 _playerRenderFacingPrev = Vector3.UnitZ;
     private Vector3 _playerRenderFacingNext = Vector3.UnitZ;
     private bool _playerRenderInit;
@@ -8726,12 +8728,20 @@ public sealed class RenderHost : IDisposable
     /// float.MaxValue when clear. AABB-rejects per node, then Möller–Trumbore
     /// per triangle.</summary>
     private float CameraBoundsHitDistance(Vector3 origin, Vector3 dir, float maxDist)
+        => TerrainHitDistance(origin, dir, maxDist, boundsOnly: true);
+
+    /// <summary>Nearest hit of a ray against the drawn terrain geometry,
+    /// skipping layers hidden above the player and faded-out nodes. With
+    /// <paramref name="boundsOnly"/> only camera-blocking nodes count (see
+    /// <see cref="CameraBoundsHitDistance"/>); without it, every visible
+    /// node does (what the cursor is actually on).</summary>
+    private float TerrainHitDistance(Vector3 origin, Vector3 dir, float maxDist, bool boundsOnly)
     {
         float best = float.MaxValue;
         foreach (var (inv, _, sno, guid, blocksFlag, regionPath) in _drapeNodes)
         {
             bool blocks = _boundsCameraOverrides.TryGetValue(guid, out var ov) ? ov : blocksFlag;
-            if (!blocks) continue;
+            if (boundsOnly && !blocks) continue;
             // SC-CAM-OCCLUDES-FIX — a region hidden as an upper layer
             // (player underground beneath it) is invisible, so it must not
             // block the camera either: the surface terrain stacked above a
@@ -18027,6 +18037,7 @@ void main()
                             // cut, not a smear across the farm.
                             _playerRenderPosPrev = tp;
                             _playerRenderPosNext = tp;
+                            _playerRenderYInit = false;
                             if (_player is not null)
                                 _player.CurrentTransform = Matrix4x4.CreateTranslation(tp);
                             Console.WriteLine($"[nis] hero teleported near scripted target ({tdist:F0}u jump)");
@@ -24893,6 +24904,20 @@ void main()
             {
                 float alpha = (float)Math.Min(1.0, _actorTickAccumulator / (1.0 / SkritInstance.FramesPerSecond));
                 var pos = Vector3.Lerp(_playerRenderPosPrev, _playerRenderPosNext, alpha);
+                // SC-STAIR-GLIDE — the walker's Y follows the nav mesh exactly,
+                // and stair meshes are stepped: 0.2u treads every tick, and at
+                // the farmhouse stair top a missing tread drops 0.9u in one
+                // 50ms tick, which read as a hop. The drawn height eases toward
+                // the walked one (time constant ~45ms), so the hero glides down
+                // the steps; a jump of more than 2.5u (teleport, lift) snaps.
+                if (!_playerRenderYInit || MathF.Abs(pos.Y - _playerRenderY) > 2.5f)
+                {
+                    _playerRenderY = pos.Y;
+                    _playerRenderYInit = true;
+                }
+                else
+                    _playerRenderY += (pos.Y - _playerRenderY) * (1f - MathF.Exp(-(float)dt * 22f));
+                pos.Y = _playerRenderY;
                 var face = Vector3.Lerp(_playerRenderFacingPrev, _playerRenderFacingNext, alpha);
                 if (face.LengthSquared() > 1e-6f) face = Vector3.Normalize(face);
                 else face = _playerRenderFacingNext;
@@ -28495,6 +28520,7 @@ void main()
         // the body doesn't lerp from the previous PC's last position.
         _playerRenderInit = false;
         _playerRenderPosPrev = _playerRenderPosNext = spawnPos;
+        _playerRenderYInit = false;
         _playerRenderFacingPrev = _playerRenderFacingNext = _playerFacing;
 
         // Phase 14b — seed PC equipment from the template's [inventory][equipment]
@@ -29341,6 +29367,34 @@ void main()
             {
                 float tPlane = (_playerFollower.Position.Y - near.Y) / dir.Y;
                 if (tPlane >= 0f && TryClickPickupAt(near + dir * tPlane)) return;
+            }
+            // SC-CLICK-SAME-FLOOR — an upper floor's walk mesh stops short of
+            // its walls, so a click into a corner or by a window missed it and
+            // the ray went on to the floor below: from the upper floor of the
+            // farmhouse with the breakable door, the hero walked down the
+            // stairs and back up toward the spot. When the nav hit lands more
+            // than a storey below the hero but the first drawn surface the ray
+            // meets is at the hero's floor height (that floor, or the foot of
+            // its wall), the click means that floor: the walker goes to the
+            // nearest walkable point on it. A click on the yard below hits the
+            // yard first and still goes to the yard.
+            float floorY = _playerFollower.Position.Y;
+            if (hit.Y < floorY - 1.5f)
+            {
+                // What the cursor is on: the first drawn surface along the ray.
+                var rayDir = Vector3.Normalize(dir);
+                float tGeo = TerrainHitDistance(near, rayDir, dir.Length(), boundsOnly: false);
+                if (tGeo < float.MaxValue)
+                {
+                    var onGeo = near + rayDir * tGeo;
+                    if (MathF.Abs(onGeo.Y - floorY) <= 1f
+                        && _navMesh.TryFindNearestEnterable(onGeo with { Y = floorY }, 1.5f, 1f,
+                               SiegeFX.Core.Nav.NavTraversal.Player, out var floorTri, out var floorHit))
+                    {
+                        tri = floorTri;
+                        hit = floorHit;
+                    }
+                }
             }
         }
         hit = hit with { Y = _navMesh.SampleYOnTriangle(tri, hit) };
@@ -43117,6 +43171,7 @@ void main()
             _playerRenderInit = false;
             if (_playerFollower is not null)
                 _playerRenderPosPrev = _playerRenderPosNext = _playerFollower.Position;
+                _playerRenderYInit = false;
             _playerRenderFacingPrev = _playerRenderFacingNext = _playerFacing;
             _cameraMode   = (CameraMode)ps.CameraMode;
             _chaseYaw     = ps.ChaseYaw;
