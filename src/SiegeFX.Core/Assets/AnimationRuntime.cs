@@ -17,6 +17,16 @@ namespace SiegeFX.Core.Assets;
 /// </summary>
 public static class AnimationRuntime
 {
+    /// <summary>A pose to fade out of when an actor changes clip: the clip it
+    /// was showing, the time into that clip when it stopped, and how much of
+    /// it is still mixed in (1 = all of it, 0 = none). Without it a new clip
+    /// snaps in at its first frame: a swing cut off by the next one, idle to
+    /// walk in a single frame.</summary>
+    public readonly record struct PoseBlend(PrsAnimation? From, float FromTime, float FromWeight)
+    {
+        public bool Active => From is not null && FromWeight > 0f;
+    }
+
     // Phase 21b-2 — bone-index map cache. Resolving "ASP bone i → PRS bone j" by
     // walking BoneNames was a per-call Dictionary<string,int> allocation, which at
     // 180 actors × 60 fps was the single largest source of Gen 0 garbage in
@@ -69,6 +79,13 @@ public static class AnimationRuntime
     /// while killing the constant bias. Actors must NOT use this — their
     /// clips' root motion is a convention the actor pipeline expects.</summary>
     public static void ComputeSkinMatrices(AspMesh mesh, PrsAnimation anim, float timeSec, Span<Matrix4x4> skinOut, bool anchorRoot)
+        => ComputeSkinMatrices(mesh, anim, timeSec, skinOut, anchorRoot, default);
+
+    /// <summary>Skin matrices with a fade from a previous pose (see <see cref="PoseBlend"/>).</summary>
+    public static void ComputeSkinMatrices(AspMesh mesh, PrsAnimation anim, float timeSec, Span<Matrix4x4> skinOut, PoseBlend blend)
+        => ComputeSkinMatrices(mesh, anim, timeSec, skinOut, anchorRoot: false, blend);
+
+    private static void ComputeSkinMatrices(AspMesh mesh, PrsAnimation anim, float timeSec, Span<Matrix4x4> skinOut, bool anchorRoot, PoseBlend blend)
     {
         var bc = mesh.BoneCount;
         if (bc == 0) return;
@@ -77,7 +94,6 @@ public static class AnimationRuntime
         if (mesh.InverseBindMatrices.Length != bc)
             throw new InvalidDataException("AspMesh InverseBindMatrices length does not match BoneCount");
 
-        var map = GetBoneMap(mesh, anim);
         const int MaxStack = 128;
         Span<Quaternion> rotBuf   = bc <= MaxStack ? stackalloc Quaternion[MaxStack] : new Quaternion[bc];
         Span<Vector3>    posBuf   = bc <= MaxStack ? stackalloc Vector3[MaxStack]    : new Vector3[bc];
@@ -86,24 +102,12 @@ public static class AnimationRuntime
         var localPos  = posBuf.Slice(0, bc);
         var worldAnim = worldBuf.Slice(0, bc);
 
-        for (var i = 0; i < bc; i++)
+        SampleLocalPose(mesh, anim, timeSec, localRot, localPos, anchorRoot);
+        if (blend.Active)
         {
-            localRot[i] = mesh.BindPose[i].Rotation;
-            localPos[i] = mesh.BindPose[i].Translation;
-        }
-        for (var i = 0; i < bc; i++)
-        {
-            var prs = map[i]; if (prs < 0) continue;
-            var keys = anim.BoneKeys[prs]; if (keys is null) continue;
-            if (keys.RotKeys.Count > 0) localRot[i] = SampleRotation(keys, anim.AnimLength, timeSec);
-            if (keys.PosKeys.Count > 0)
-            {
-                var pos = SamplePosition(keys, anim.AnimLength, timeSec);
-                if (anchorRoot && mesh.BoneParents[i] < 0)
-                    pos = mesh.BindPose[i].Translation
-                        + (pos - SamplePosition(keys, anim.AnimLength, 0f));
-                localPos[i] = pos;
-            }
+            Span<Quaternion> fromRotBuf = bc <= MaxStack ? stackalloc Quaternion[MaxStack] : new Quaternion[bc];
+            Span<Vector3>    fromPosBuf = bc <= MaxStack ? stackalloc Vector3[MaxStack]    : new Vector3[bc];
+            MixFromPose(mesh, blend, localRot, localPos, fromRotBuf.Slice(0, bc), fromPosBuf.Slice(0, bc), anchorRoot);
         }
         for (var i = 0; i < bc; i++)
         {
@@ -139,6 +143,12 @@ public static class AnimationRuntime
 
     /// <summary>Zero-alloc overload of <see cref="ComputeAnimatedBoneWorlds(AspMesh,PrsAnimation?,float)"/>.</summary>
     public static void ComputeAnimatedBoneWorlds(AspMesh mesh, PrsAnimation? anim, float timeSec, Span<Matrix4x4> worldOut)
+        => ComputeAnimatedBoneWorlds(mesh, anim, timeSec, worldOut, default);
+
+    /// <summary>Bone worlds with a fade from a previous pose, matching
+    /// <see cref="ComputeSkinMatrices(AspMesh,PrsAnimation,float,Span{Matrix4x4},PoseBlend)"/>
+    /// so a held weapon stays in the hand while the body blends.</summary>
+    public static void ComputeAnimatedBoneWorlds(AspMesh mesh, PrsAnimation? anim, float timeSec, Span<Matrix4x4> worldOut, PoseBlend blend)
     {
         var bc = mesh.BoneCount;
         if (bc == 0) return;
@@ -150,21 +160,12 @@ public static class AnimationRuntime
         Span<Vector3>    posBuf = bc <= MaxStack ? stackalloc Vector3[MaxStack]    : new Vector3[bc];
         var localRot = rotBuf.Slice(0, bc);
         var localPos = posBuf.Slice(0, bc);
-        for (var i = 0; i < bc; i++)
+        SampleLocalPose(mesh, anim, timeSec, localRot, localPos, anchorRoot: false);
+        if (blend.Active)
         {
-            localRot[i] = mesh.BindPose[i].Rotation;
-            localPos[i] = mesh.BindPose[i].Translation;
-        }
-        if (anim is not null)
-        {
-            var map = GetBoneMap(mesh, anim);
-            for (var i = 0; i < bc; i++)
-            {
-                var prs = map[i]; if (prs < 0) continue;
-                var keys = anim.BoneKeys[prs]; if (keys is null) continue;
-                if (keys.RotKeys.Count > 0) localRot[i] = SampleRotation(keys, anim.AnimLength, timeSec);
-                if (keys.PosKeys.Count > 0) localPos[i] = SamplePosition(keys, anim.AnimLength, timeSec);
-            }
+            Span<Quaternion> fromRotBuf = bc <= MaxStack ? stackalloc Quaternion[MaxStack] : new Quaternion[bc];
+            Span<Vector3>    fromPosBuf = bc <= MaxStack ? stackalloc Vector3[MaxStack]    : new Vector3[bc];
+            MixFromPose(mesh, blend, localRot, localPos, fromRotBuf.Slice(0, bc), fromPosBuf.Slice(0, bc), anchorRoot: false);
         }
         for (var i = 0; i < bc; i++)
         {
@@ -202,6 +203,51 @@ public static class AnimationRuntime
             outPositions[c] = acc;
         }
         return outPositions;
+    }
+
+    /// <summary>Each bone's parent-space rotation and translation for
+    /// <paramref name="anim"/> at <paramref name="timeSec"/>; the bind pose for
+    /// bones the clip has no keys for (and for all of them with no clip).</summary>
+    private static void SampleLocalPose(AspMesh mesh, PrsAnimation? anim, float timeSec,
+        Span<Quaternion> localRot, Span<Vector3> localPos, bool anchorRoot)
+    {
+        var bc = mesh.BoneCount;
+        for (var i = 0; i < bc; i++)
+        {
+            localRot[i] = mesh.BindPose[i].Rotation;
+            localPos[i] = mesh.BindPose[i].Translation;
+        }
+        if (anim is null) return;
+        var map = GetBoneMap(mesh, anim);
+        for (var i = 0; i < bc; i++)
+        {
+            var prs = map[i]; if (prs < 0) continue;
+            var keys = anim.BoneKeys[prs]; if (keys is null) continue;
+            if (keys.RotKeys.Count > 0) localRot[i] = SampleRotation(keys, anim.AnimLength, timeSec);
+            if (keys.PosKeys.Count > 0)
+            {
+                var pos = SamplePosition(keys, anim.AnimLength, timeSec);
+                if (anchorRoot && mesh.BoneParents[i] < 0)
+                    pos = mesh.BindPose[i].Translation
+                        + (pos - SamplePosition(keys, anim.AnimLength, 0f));
+                localPos[i] = pos;
+            }
+        }
+    }
+
+    /// <summary>Mix <paramref name="blend"/>'s pose into the sampled one, bone by
+    /// bone in parent space: rotations slerp, translations lerp.</summary>
+    private static void MixFromPose(AspMesh mesh, PoseBlend blend,
+        Span<Quaternion> localRot, Span<Vector3> localPos,
+        Span<Quaternion> fromRot, Span<Vector3> fromPos, bool anchorRoot)
+    {
+        SampleLocalPose(mesh, blend.From, blend.FromTime, fromRot, fromPos, anchorRoot);
+        float toward = 1f - Math.Clamp(blend.FromWeight, 0f, 1f);
+        for (var i = 0; i < localRot.Length; i++)
+        {
+            localRot[i] = Quaternion.Slerp(fromRot[i], localRot[i], toward);
+            localPos[i] = Vector3.Lerp(fromPos[i], localPos[i], toward);
+        }
     }
 
     /// <summary>Sample one bone's rotation/translation from a clip at the given time.
