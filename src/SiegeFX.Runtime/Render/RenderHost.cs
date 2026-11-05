@@ -15590,15 +15590,17 @@ void main()
         return null;
     }
 
-    // The creator offers the farm boy hair_001..010 (011 on are NPC hairs),
-    // in two sets: 001..006 paint the scalp and face, while 007..010 also
-    // paint the strips below the face that the mohawk and bun heads map
-    // their crests onto. The original gives each head its own set: the
-    // scalp set on the plain heads, the crest set on the mohawk and bun (so
-    // a crest never shows skin, a mohawk never a long-hair scalp), and both
-    // on the bald body head, crest set first. Read off the textures: the
-    // offered hairs run up to the last that paints the strips.
+    // The creator offers hair_001..010 (011 on are NPC hairs). The farm
+    // girl's ten are one style in ten colors, the same on every head. The
+    // farm boy's split in two sets: 001..006 paint the scalp and face, while
+    // 007..010 also paint the strips below the face that the mohawk and bun
+    // heads map their crests onto. The original gives his plain heads the
+    // scalp set, the mohawk and bun the crest set (so a crest never shows
+    // skin, a mohawk never a long-hair scalp), and the bald body head both,
+    // crest set first. The split is read off the textures; when every hair
+    // paints the strips (the girl's ponytails) there is none.
     private const float HairStripTopV = 0.6f;
+    private const int CreatorHairCount = 10;
     private readonly Dictionary<string, List<string>> _ccHairForHead = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The hair overlays the Hair button walks for the picker's head.</summary>
@@ -15609,21 +15611,43 @@ void main()
         string key = head ?? $"bald:{picker.Gender}";
         if (_ccHairForHead.TryGetValue(key, out var hit)) return hit;
 
-        var strips = _ccHair.Select(HairPaintsStrips).ToList();
-        int last = strips.FindLastIndex(v => v == true);
         var scalp = new List<string>();
         var crestSet = new List<string>();
-        for (int i = 0; i < _ccHair.Count && (last < 0 || i <= last); i++)
+        foreach (var h in _ccHair)
         {
-            if (strips[i] is null) continue;
-            (strips[i] == true ? crestSet : scalp).Add(_ccHair[i]);
+            if (!int.TryParse(h[(h.LastIndexOf('_') + 1)..], out int n) || n < 1 || n > CreatorHairCount) continue;
+            var strips = HairPaintsStrips(h);
+            if (strips is null) continue;
+            (strips == true ? crestSet : scalp).Add(h);
         }
-        List<string> list = head is null ? crestSet.Concat(scalp).ToList()
+        List<string> list = crestSet.Count == 0 || scalp.Count == 0 ? crestSet.Concat(scalp).ToList()
+                          : head is null ? crestSet.Concat(scalp).ToList()
                           : HeadReachesHairStrips(head) ? crestSet : scalp;
         if (list.Count == 0) list = _ccHair;
         _ccHairForHead[key] = list;
         Console.WriteLine($"[cc-options] {head ?? "bald (body head)"}: hair {string.Join(" ", list.Select(h => h[(h.LastIndexOf('_') + 1)..]))}");
         return list;
+    }
+
+    /// <summary>The creator's starting hair for a gender on the first head:
+    /// /config/character_defaults.gas texture_farmboy_hair /
+    /// texture_farmgirl_hair (the girl's is red), else the first.</summary>
+    private int DefaultHairIdx(HeroGender gender)
+    {
+        var picker = new HeroVariantPicker { Gender = gender };
+        EnsureCreatorOptions(gender);
+        var list = HairListFor(picker);
+        string key = gender == HeroGender.Girl ? "texture_farmgirl_hair" : "texture_farmboy_hair";
+        if (_playResolver is null || !_playResolver.TryLoadByBasename("character_defaults.gas", out var bytes)) return 0;
+        try
+        {
+            foreach (var r in SiegeFX.Core.Assets.GasDocument.Load(bytes).Roots)
+                foreach (var a in r.Attributes)
+                    if (a.Name.Equals(key, StringComparison.OrdinalIgnoreCase))
+                        return Math.Max(0, list.FindIndex(h => h.Equals(a.Value.Trim(), StringComparison.OrdinalIgnoreCase)));
+        }
+        catch { }
+        return 0;
     }
 
     // True when the head maps part of itself onto the strips below the face.
@@ -24610,6 +24634,7 @@ void main()
                 // the state-machine edge.
                 if (now == Hud.FrontendScene.ScreenState.CharacterSelect)
                 {
+                    _creator.DefaultHair ??= DefaultHairIdx;
                     _creator.Reset();
                 }
             }
@@ -28062,6 +28087,7 @@ void main()
         {
             _pendingSpawner = spawner;
             _pendingNavMesh = navMesh;
+            _creator.DefaultHair ??= DefaultHairIdx;
             _creator.Reset();
             // Phase 22-SC-MUSIC-B — kick the menu music as the creator
             // panel comes up. DS1's frontend track is s_m_frontend.mp3
