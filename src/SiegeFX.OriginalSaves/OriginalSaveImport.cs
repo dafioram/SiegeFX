@@ -210,6 +210,12 @@ public static class OriginalSaveImport
             }
             if (counters > 0)
                 notes.Add($"world: {counters} auditor counter(s) not carried (kill counts, to-hit bonuses); SiegeFX has no matching state");
+            if (OriginalWorldFacts.Formation(world) is { } formation)
+            {
+                ws.PartyFormation = PartyFormation(formation) ?? "";
+                if (ws.PartyFormation.Length == 0)
+                    notes.Add($"world: formation '{formation}' has no SiegeFX match; the default stands");
+            }
             file.World = ws;
             // The original's own tips are behind the player: don't replay
             // SiegeFX's from the first one. Its "show tips" option carries over.
@@ -309,6 +315,19 @@ public static class OriginalSaveImport
         }
         return rows;
     }
+
+    /// <summary>The original's formation name (a world/ai/formations.gas
+    /// block) as SiegeFX's PartyFormation name; null for one it lacks.</summary>
+    public static string? PartyFormation(string name) => name.ToLowerInvariant() switch
+    {
+        "circle" => "Circle",
+        "column" => "Column",
+        "double_column" => "DoubleColumn",
+        "line" => "Row",
+        "double_line" => "DoubleRow",
+        "wedge" => "Pyramid",
+        _ => null,
+    };
 
     /// <summary>The SCID the original gives objects made at run time.</summary>
     const uint RunTimeScid = 0xfffffffe;
