@@ -308,6 +308,11 @@ public sealed class ElevatorStopSnapshot
 public sealed class LootPileSnapshot
 {
     public Vec3 Position { get; set; }
+    /// <summary>An imported pile's spot as the original stores it: a terrain
+    /// node (0 = none, use <see cref="Position"/>) and the offset inside it;
+    /// the load turns it into <see cref="Position"/> once the layout is up.</summary>
+    public uint Node { get; set; }
+    public Vec3 NodeOffset { get; set; }
     public List<LootEntrySnapshot> Entries { get; set; } = new();
 }
 
