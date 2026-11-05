@@ -15484,6 +15484,7 @@ void main()
         if (_ccOptGender == gender && _ccSkin.Count > 0) return;
         _ccOptGender = gender;
         _ccCompCache.Clear();
+        _ccHairForHead.Clear();
         string stem = gender == HeroGender.Girl ? "fg" : "fb";
         _ccHair  = StrippedSorted($"b_c_gah_{stem}_hair_");
         _ccShirt = StrippedSorted("b_c_pos_a1_shrt_");
@@ -15577,7 +15578,7 @@ void main()
         {
             var skin = PickVariant(_ccSkin, picker.FaceIdx);
             if (skin is null) return null;
-            var hair = PickVariant(_ccHair, picker.StyleIdx);
+            var hair = PickVariant(HairListFor(picker), picker.StyleIdx);
             return CompositeSkin(skin, hair);
         }
         if (slot == 1)
@@ -15587,6 +15588,54 @@ void main()
                 PickVariant(_ccShirt, picker.ShirtIdx), PickVariant(_ccPant, picker.PantsIdx));
         }
         return null;
+    }
+
+    // The hair overlays come in two sets. Most paint only the scalp and face;
+    // a few (the farm boy's hair_007..010) also paint the strips below the
+    // face, where the mohawk and bun heads map their crests. The original
+    // offers each head only its own set (four hairs on the mohawk), so a
+    // crest never shows skin and a mohawk never gets a long-hair scalp.
+    private const float HairStripTopV = 0.6f;
+    private readonly Dictionary<string, List<string>> _ccHairForHead = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The hair overlays the Hair button walks for the picker's head.</summary>
+    private List<string> HairListFor(HeroVariantPicker picker)
+    {
+        var head = HeadMeshFor(picker);
+        if (head is null || _ccHair.Count == 0) return _ccHair;
+        if (_ccHairForHead.TryGetValue(head, out var hit)) return hit;
+        bool crest = HeadReachesHairStrips(head);
+        var list = _ccHair.Where(h => HairPaintsStrips(h) == crest).ToList();
+        if (list.Count == 0) list = _ccHair;
+        _ccHairForHead[head] = list;
+        Console.WriteLine($"[cc-options] {head}: hair {string.Join(" ", list.Select(h => h[(h.LastIndexOf('_') + 1)..]))}");
+        return list;
+    }
+
+    // True when the head maps part of itself onto the strips below the face.
+    private bool HeadReachesHairStrips(string headMesh)
+    {
+        if (_playResolver is null || !_playResolver.TryLoadModel(headMesh, out var bytes)) return false;
+        try
+        {
+            var asp = SiegeFX.Core.Assets.AspMesh.Load(bytes);
+            foreach (var c in asp.Corners) if (c.Uv.Y > HairStripTopV) return true;
+        }
+        catch { }
+        return false;
+    }
+
+    // True when a hair overlay paints the strips below the face (over 1%);
+    // null when it doesn't load (the farm boy's hair_029), so no set offers it.
+    private bool? HairPaintsStrips(string hairName)
+    {
+        var rgba = LoadRawRgba(hairName, out int w, out int h);
+        if (rgba is null || w == 0 || h == 0) return null;
+        int y0 = (int)(h * HairStripTopV), on = 0;
+        for (int y = y0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (rgba[(y * w + x) * 4 + 3] > 32) on++;
+        return on * 100 > (h - y0) * w;
     }
 
     /// <summary>Slot 0: the skin with the hair overlay over it, in the
