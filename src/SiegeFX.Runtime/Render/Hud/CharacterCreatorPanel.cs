@@ -267,8 +267,10 @@ internal sealed class CharacterCreatorPanel
             case Action.GenderRight:
                 Picker = With(g: Toggle(Picker.Gender));
                 break;
-            case Action.HeadLeft:   Picker = With(head:  Picker.HeadIdx  - 1); break;
-            case Action.HeadRight:  Picker = With(head:  Picker.HeadIdx  + 1); break;
+            // Each head has its own hair set, so a new head starts on the
+            // first hair of its set, as in the original.
+            case Action.HeadLeft:   Picker = With(head:  Picker.HeadIdx  - 1, style: 0); break;
+            case Action.HeadRight:  Picker = With(head:  Picker.HeadIdx  + 1, style: 0); break;
             case Action.FaceLeft:   Picker = With(face:  Picker.FaceIdx  - 1); break;
             case Action.FaceRight:  Picker = With(face:  Picker.FaceIdx  + 1); break;
             case Action.HairLeft:   Picker = With(style: Picker.StyleIdx - 1); break;
