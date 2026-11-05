@@ -57,10 +57,10 @@ internal sealed class CharacterCreatorPanel
     public bool Cancelled { get; set; }
 
     /// <summary>How many choices the Head button has (the head meshes plus
-    /// the body's own, bald head); 0 = not known yet, no clamp.</summary>
+    /// the body's own, bald head); 0 = not known yet, no wrap.</summary>
     public int HeadCount { get; set; }
 
-    int ClampHead(int idx) => HeadCount > 0 ? Math.Clamp(idx, 0, HeadCount - 1) : idx;
+    int WrapHead(int idx) => HeadCount > 0 ? ((idx % HeadCount) + HeadCount) % HeadCount : Math.Max(0, idx);
 
     public HeroVariantPicker Picker { get; private set; } = new()
     {
@@ -275,10 +275,11 @@ internal sealed class CharacterCreatorPanel
                 break;
             // Each head has its own hair set, so a new head starts on the
             // first hair of its set, as in the original.
-            // Head stops at its ends rather than wrapping, as in the original
-            // (bald, the last, is reached only going right).
-            case Action.HeadLeft:   Picker = With(head:  ClampHead(Picker.HeadIdx - 1), style: 0); break;
-            case Action.HeadRight:  Picker = With(head:  ClampHead(Picker.HeadIdx + 1), style: 0); break;
+            // Head cycles its choices both ways. The original's left button
+            // never reaches bald (the last); ours walks the same list in
+            // reverse so left always undoes right.
+            case Action.HeadLeft:   Picker = With(head:  WrapHead(Picker.HeadIdx - 1), style: 0); break;
+            case Action.HeadRight:  Picker = With(head:  WrapHead(Picker.HeadIdx + 1), style: 0); break;
             case Action.FaceLeft:   Picker = With(face:  Picker.FaceIdx  - 1); break;
             case Action.FaceRight:  Picker = With(face:  Picker.FaceIdx  + 1); break;
             case Action.HairLeft:   Picker = With(style: Picker.StyleIdx - 1); break;
