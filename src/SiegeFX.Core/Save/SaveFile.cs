@@ -492,6 +492,10 @@ public sealed class HeroVariantSnapshot
     // fields above. These were the documented v1 follow-up ("appearance
     // resets on load") — a load used to silently drop face/hair/shirt/pants.
     public int FaceIdx  { get; set; } = -1;
+    /// <summary>The creator's Head: which head mesh replaces the body's own
+    /// (sorted m_c_&lt;armor_version&gt;_hlmt_head-*; 0 = the first, head-02).
+    /// -1 = a save from before the field, which loads with the first.</summary>
+    public int HeadIdx  { get; set; } = -1;
     public int StyleIdx { get; set; } = -1;
     public int ColorIdx { get; set; } = -1;
     public int ShirtIdx { get; set; } = -1;

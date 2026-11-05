@@ -62,6 +62,13 @@ internal sealed class HeroVariantPicker
     // supersede the suffix fields above, which now only feed the (default) mesh
     // pick + save plumbing — the body mesh no longer changes from a lever.
     public int FaceIdx  { get; init; }
+    /// <summary>The Head button: which of the template's head meshes
+    /// (<c>m_c_&lt;armor_version&gt;_hlmt_head-NN</c>, sorted) replaces the
+    /// body's own head, as in the original, whose saves name it as
+    /// <c>custom_head</c>. 0 = the first, head-02, the original's default.
+    /// Wraps by the count that ships.</summary>
+    public int HeadIdx  { get; init; }
+    /// <summary>The Hair button: which hair overlay (hair_NNN) goes on the skin.</summary>
     public int StyleIdx { get; init; }
     public int ColorIdx { get; init; }
     public int PantsIdx { get; init; }
@@ -97,6 +104,7 @@ internal sealed class HeroVariantPicker
             SkinSuffix = skin,
             PantsSuffix = pants,
             FaceIdx  = EnvIdx("SIEGEFX_HERO_FACE"),
+            HeadIdx  = EnvIdx("SIEGEFX_HERO_HEAD"),
             StyleIdx = EnvIdx("SIEGEFX_HERO_STYLE"),
             ColorIdx = EnvIdx("SIEGEFX_HERO_COLOR"),
             ShirtIdx = EnvIdx("SIEGEFX_HERO_SHIRT"),
