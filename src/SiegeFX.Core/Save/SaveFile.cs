@@ -154,6 +154,14 @@ public sealed class SaveFile
     /// actor (matched by scid when it exists in the region, respawned from
     /// the template when it doesn't) and restores its backpack/equipment.</summary>
     public List<CompanionSnapshot> Party { get; set; } = new();
+
+    /// <summary>The original-game save this one was converted from (its
+    /// path), or empty for a save SiegeFX wrote. An import has no camera or
+    /// facing of its own, so the load keeps the game's defaults for those; it
+    /// places the hero from <see cref="PlayerSnapshot.SpawnNode"/> and the
+    /// companions beside the hero. The game writes its own saves after that,
+    /// so the field doesn't survive a re-save. Older builds ignore it.</summary>
+    public string ImportedFrom { get; set; } = "";
 }
 
 /// <summary>v13 SC-PARTY-PERSIST — one recruited companion.</summary>
@@ -465,6 +473,14 @@ public sealed class PlayerSnapshot
     /// Empty list on v7-and-earlier loads — those saves predate the SCID-
     /// tracking and re-spawn every world inventory item on reload.</summary>
     public List<uint> ConsumedInventoryScids { get; set; } = new();
+
+    /// <summary>Where an imported save puts the hero, as the original game
+    /// stores a position: a terrain node (0 = none) and the offset inside it.
+    /// The load resolves it against the region layout, which only exists once
+    /// the region is up. SiegeFX's own saves leave it 0 and carry the hero's
+    /// world position in <see cref="SaveFile.Actors"/>.</summary>
+    public uint SpawnNode { get; set; }
+    public Vec3 SpawnOffset { get; set; }
 }
 
 /// <summary>Phase 21d-2a-viii-c — frozen snapshot of the character creator's

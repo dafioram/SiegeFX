@@ -1,0 +1,283 @@
+using System.Buffers.Binary;
+using SiegeFX.Core.Actors;
+using SiegeFX.Core.Assets;
+using SiegeFX.Core.Save;
+using SiegeFX.OriginalSaves;
+
+namespace SiegeFX.Tests;
+
+/// <summary>Converting an original-game save into a SiegeFX save. All data is
+/// made up for the test; field names and shapes follow
+/// docs/original-save-format.md.</summary>
+public class OriginalSaveImportTests
+{
+    const string Info = """
+        [info]
+        {
+            hero_name = "Wren";
+            map_name = map_world;
+            map_screen_name = "Kingdom of Ehb";
+            region = fh_r2;
+            screen_name = "Wren (0-10-00)";
+            single_player = true;
+            teleport = map_world:n:1.5,0.25,-2,0x0a0b0c0d;
+            time_elapsed = 600;
+        }
+        """;
+
+    const string Party = """
+        [party]
+        {
+            [members]
+            {
+                [0]
+                {
+                    [member]
+                    {
+                        combat_orders = co_limited;
+                        focus_orders = fo_strongest;
+                        movement_orders = mo_hold;
+                        screen_name = "Wren";
+                        selected_active_location = il_active_ranged_weapon;
+                        template_name = farmgirl;
+                        [inventory]
+                        {
+                            [0] { equip_slot = es_chest; inv_location = il_main; template_name = test_tunic; }
+                            [1] { inv_location = il_active_melee_weapon; template_name = test_dagger; }
+                            [2] { inv_location = il_active_ranged_weapon; template_name = test_bow; }
+                            [3] { grid_x = 255; grid_y = 30; inv_location = il_main; template_name = test_potion; }
+                            [4] { inv_location = il_active_primary_spell; template_name = test_spell_a; }
+                            [5] { inv_location = il_spell_1; template_name = test_spell_b; }
+                            [6] { equip_slot = es_ring_0; inv_location = il_main; template_name = test_ring_a; }
+                            [7] { equip_slot = es_ring_1; inv_location = il_main; template_name = test_ring_b; }
+                            [8] { inv_location = il_somewhere_new; template_name = test_odd; }
+                        }
+                        [skills]
+                        {
+                            combat_magic_level = 1.01;
+                            combat_magic_xp = 4;
+                            dexterity_level = 13.5;
+                            intelligence_level = 10.25;
+                            melee_level = 2.2;
+                            melee_xp = 120.4;
+                            nature_magic_level = 0;
+                            nature_magic_xp = 0;
+                            ranged_level = 3.4;
+                            ranged_xp = 300.6;
+                            strength_level = 12;
+                            uber_level = 3.7;
+                            uber_xp = 425;
+                        }
+                        [skins] { 0 = test_skin_03,test_hair_002; }
+                    }
+                }
+                [1]
+                {
+                    [member]
+                    {
+                        combat_orders = co_free;
+                        focus_orders = fo_closest;
+                        movement_orders = mo_free;
+                        screen_name = "Ally";
+                        template_name = test_ally;
+                        [inventory]
+                        {
+                            [0] { equip_slot = es_weapon_hand; inv_location = il_main; template_name = test_axe; }
+                            [1] { grid_x = 287; grid_y = 30; inv_location = il_main; template_name = test_bread; }
+                        }
+                        [skills] { melee_level = 2; melee_xp = 50; uber_level = 2.1; uber_xp = 60; }
+                    }
+                }
+                [2]
+                {
+                    [member]
+                    {
+                        screen_name = "Mule";
+                        template_name = test_mule;
+                        [inventory] { [0] { grid_x = 255; grid_y = 30; inv_location = il_main; template_name = test_ore; } }
+                    }
+                }
+            }
+            [party] { gold = 77; hero_index = 0; }
+        }
+        """;
+
+    /// <summary>A world tree with two quests, three flags, saved objects (the
+    /// ally's own placement, a map item carried in a pack) and two retired
+    /// placements.</summary>
+    static XferTree World()
+    {
+        static XferBuilder.Node Quest(string i, string name, bool active, bool done) => new(i, new XferBuilder.Node("_value",
+            XferBuilder.Text("sname", name), XferBuilder.Bool("bactive", active), XferBuilder.Bool("bcompleted", done)));
+        static XferBuilder.Node Flag(string i, string key, bool b, int n) => new(i, XferBuilder.Text("m_key", key),
+            XferBuilder.Int("m_int", n), XferBuilder.Bool("m_bool", b), XferBuilder.Float("m_float", 0), XferBuilder.Text("m_string", ""));
+        var (idx, dat) = XferBuilder.Build(new XferBuilder.Node("",
+            new XferBuilder.Node("world",
+                new XferBuilder.Node("m_pvictory", new XferBuilder.Node("m_quests",
+                    Quest("0", "test_quest_open", true, false),
+                    Quest("1", "test_quest_done", false, true),
+                    Quest("2", "test_quest_unseen", false, false))),
+                new XferBuilder.Node("m_pgameauditor", new XferBuilder.Node("m_entries",
+                    Flag("0", "test_talked", true, 0),
+                    Flag("1", "test_not_yet", false, 0),
+                    Flag("2", "test_kills", false, 9)))),
+            new XferBuilder.Node("godb",
+                new XferBuilder.Node("m_globaldb",
+                    new XferBuilder.Node("0", XferBuilder.Int("m_scid", 0x01c00b40), XferBuilder.Text("m_datatemplate", "test_ally")),
+                    new XferBuilder.Node("1", XferBuilder.Int("m_scid", 0x01c00274), XferBuilder.Text("m_datatemplate", "test_potion"),
+                        XferBuilder.Bool("m_isinsideinventory", true)),
+                    new XferBuilder.Node("2", XferBuilder.Int("m_scid", 0x01c005ca), XferBuilder.Text("m_datatemplate", "test_krug"))),
+                new XferBuilder.Node("m_retiredscidcoll",
+                    new XferBuilder.Node("0", XferBuilder.Int("_value", 0x01c005ca)),
+                    new XferBuilder.Node("1", XferBuilder.Int("_value", 0x01c00008))))));
+        return XferTree.Load(idx, dat);
+    }
+
+    static OriginalSaveImportResult Import(string info = Info, XferTree? world = null, byte[]? thumb = null) =>
+        OriginalSaveImport.Import(OriginalSaveInfo.Parse(GasDocument.Parse(info)),
+                                  OriginalParty.Parse(GasDocument.Parse(Party)), world, thumb,
+                                  "Wren.dssave", new DateTime(2026, 11, 5, 12, 0, 0));
+
+    [Fact]
+    public void The_save_lands_in_the_saved_region_with_the_hero_on_the_saved_node()
+    {
+        var s = Import(world: World()).Save;
+        Assert.Equal("/world/maps/map_world/regions/fh_r2", s.RegionPath);
+        Assert.Equal(("Original: Wren (0-10-00)", "Wren", "Kingdom of Ehb", 600.0), (s.DisplayName, s.HeroName, s.MapName, s.ElapsedSeconds));
+        Assert.Equal("Wren.dssave", s.ImportedFrom);
+        Assert.Equal(0x0a0b0c0du, s.Player!.SpawnNode);
+        Assert.Equal(new Vec3(1.5f, 0.25f, -2f), s.Player.SpawnOffset);
+        Assert.Equal(OriginalSaveImport.HeroScid, s.Player.Scid);
+    }
+
+    [Fact]
+    public void The_hero_keeps_xp_attributes_gold_orders_and_gender()
+    {
+        var p = Import(world: World()).Save.Player!;
+        Assert.Equal((425L, 3), (p.TotalXp, p.Level));
+        Assert.Equal([120L, 301L, 0L, 4L], p.SkillXp);   // Melee, Ranged, NatureMagic, CombatMagic
+        Assert.Equal((12f, 13.5f, 10.25f), (p.Strength, p.Dexterity, p.Intelligence));
+        Assert.Equal(77L, p.Gold);
+        Assert.Equal((2, 1, 1), (p.MoveOrder, p.AtkOrder, p.TgtOrder));
+        Assert.Equal(1, p.ActiveSlot);
+        Assert.Equal("girl", p.Variant!.Gender);
+        Assert.Equal(0, p.Variant.FaceIdx);
+    }
+
+    [Fact]
+    public void Worn_gear_active_weapons_and_spells_land_in_their_slots()
+    {
+        var r = Import(world: World());
+        var p = r.Save.Player!;
+        string? Worn(string slot) => p.Inventory.FirstOrDefault(e => e.Slot == "equipped:" + slot)?.Reference;
+        Assert.Equal("test_tunic", Worn("chest"));
+        Assert.Equal("test_dagger", Worn("weapon_hand"));
+        Assert.Equal("test_bow", Worn("ranged_weapon"));
+        Assert.Equal("test_ring_a", Worn("ring"));
+        Assert.Equal("test_ring_b", Worn("ring_1"));
+        Assert.Equal(["test_potion", "test_odd"], p.Inventory.Where(e => e.Slot == "").Select(e => e.Reference));
+        Assert.Equal("test_spell_a", p.Spellbook!.PrimarySpell);
+        Assert.Equal(["test_spell_b"], p.Spellbook.Placed);
+        Assert.Contains(r.Notes, n => n.Contains("il_somewhere_new"));
+        Assert.Contains(r.Notes, n => n.Contains("test_skin_03"));
+    }
+
+    [Fact]
+    public void Companions_join_on_their_own_placement_or_as_new_actors()
+    {
+        var r = Import(world: World());
+        var (ally, mule) = (r.Save.Party[0], r.Save.Party[1]);
+        Assert.Equal((0x01c00b40u, "test_ally", 1), (ally.Scid, ally.TemplateName, ally.PartyIndex));
+        Assert.Equal((60L, 50L), (ally.TotalXp, ally.SkillXp[0]));
+        Assert.Equal((0, 0, 0), (ally.MoveOrder, ally.AtkOrder, ally.TgtOrder));
+        Assert.Equal("test_axe", ally.Equipment["es_weapon_hand"]);
+        Assert.Equal(["test_bread"], ally.Inventory.Select(e => e.Reference));   // worn gear stays out of the pack
+        Assert.True(ally.CurrentLife > 1e6f);
+        Assert.Equal(default, ally.Position);   // the game stands them beside the hero
+        Assert.Equal((OriginalSaveImport.ImportedCompanionScidBase + 2, 2), (mule.Scid, mule.PartyIndex));
+        Assert.Contains(r.Notes, n => n.Contains("'Mule'"));
+    }
+
+    [Fact]
+    public void Quests_flags_and_retired_placements_come_from_the_world()
+    {
+        var s = Import(world: World()).Save;
+        Assert.Equal([("test_quest_open", QuestState.Active), ("test_quest_done", QuestState.Completed)],
+                     s.Player!.Quests.Select(q => (q.Key, q.State)));
+        Assert.Equal(new Dictionary<string, bool> { ["test_talked"] = true, ["test_not_yet"] = false }, s.World!.Bools);
+        Assert.Equal([(0x01c00008u, ""), (0x01c005cau, "test_krug")],
+                     s.Actors.Select(a => (a.Scid, a.TemplateName)));
+        Assert.All(s.Actors, a => Assert.True(a.IsDead));
+        // Retired placements and the map item carried in the pack stay gone.
+        Assert.Equal([0x01c00008u, 0x01c00274u, 0x01c005cau], s.Player.ConsumedInventoryScids);
+    }
+
+    [Fact]
+    public void A_character_file_without_a_world_starts_the_campaign()
+    {
+        var r = Import();
+        Assert.Equal(OriginalSaveImport.CampaignStartRegion, r.Save.RegionPath);
+        Assert.Equal(0u, r.Save.Player!.SpawnNode);
+        Assert.Empty(r.Save.Actors);
+        Assert.Null(r.Save.World);
+        Assert.Contains(r.Notes, n => n.Contains("no world"));
+    }
+
+    [Fact]
+    public void A_legends_of_aranna_save_is_refused()
+    {
+        var loa = Info.Replace("map_name = map_world;", "map_name = map_expansion;");
+        Assert.Throws<NotSupportedException>(() => Import(loa));
+    }
+
+    [Fact]
+    public void An_import_round_trips_through_the_save_file()
+    {
+        var back = SaveStore.Deserialize(SaveStore.Serialize(Import(world: World()).Save))!;
+        Assert.Equal("Wren.dssave", back.ImportedFrom);
+        Assert.Equal(0x0a0b0c0du, back.Player!.SpawnNode);
+        Assert.Equal(new Vec3(1.5f, 0.25f, -2f), back.Player.SpawnOffset);
+    }
+
+    /// <summary>A 2×2 bitmap: bottom row red, blue; top row green, white.</summary>
+    static byte[] Bmp(int bpp, bool topDown)
+    {
+        int bytesPer = bpp / 8, stride = (2 * bytesPer + 3) & ~3;
+        var b = new byte[54 + stride * 2];
+        b[0] = (byte)'B'; b[1] = (byte)'M';
+        BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(10), 54);
+        BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(14), 40);
+        BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(18), 2);
+        BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(22), topDown ? -2 : 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(26), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(28), (ushort)bpp);
+        byte[][] bottom = [[0, 0, 255], [255, 0, 0]];       // BGR: red, blue
+        byte[][] top = [[0, 255, 0], [255, 255, 255]];      // green, white
+        void Row(int fileRow, byte[][] px)
+        {
+            for (int x = 0; x < 2; x++) px[x].CopyTo(b, 54 + fileRow * stride + x * bytesPer);
+        }
+        Row(topDown ? 1 : 0, bottom);
+        Row(topDown ? 0 : 1, top);
+        return b;
+    }
+
+    [Theory]
+    [InlineData(24, false)]
+    [InlineData(24, true)]
+    [InlineData(32, false)]
+    public void A_thumbnail_bitmap_becomes_bottom_up_rgba(int bpp, bool topDown)
+    {
+        Assert.True(ThumbnailCodec.TryDecode(OriginalSaveImport.BmpToThumbnail(Bmp(bpp, topDown)), out var w, out var h, out var rgba));
+        Assert.Equal((2, 2), (w, h));
+        Assert.Equal(new byte[] { 255, 0, 0, 255, 0, 0, 255, 255, 0, 255, 0, 255, 255, 255, 255, 255 }, rgba);
+    }
+
+    [Fact]
+    public void A_thumbnail_that_is_not_a_plain_bitmap_is_left_out()
+    {
+        var r = Import(world: World(), thumb: [1, 2, 3]);
+        Assert.Null(r.Save.Thumbnail);
+        Assert.Contains(r.Notes, n => n.StartsWith("thumbnail"));
+    }
+}
