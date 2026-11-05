@@ -420,6 +420,9 @@ any other save.
 | XP, level, attributes, skill XP | `[skills]`: `uber_xp`, `uber_level`, `strength/dexterity/intelligence_level`, `melee/ranged/nature_magic/combat_magic_xp` |
 | Gold, orders, active slot | `[party] gold`; the `*_orders`; `selected_active_location` |
 | Items | `[inventory]`: `equip_slot` → worn; `il_active_melee_weapon` / `il_active_ranged_weapon` → weapon hand / ranged slot; `il_active_*_spell`, `il_spell_*` → the spellbook; the rest → the pack |
+| Spells in the worn book | `party.gas` lists the book but not the spells in it (seen in a DS1 save: the book worn, no spell rows). They are the objects whose `m_parent` is the book's `m_goid`, the book's own parent being the hero's goid; the first becomes Active Spell 1 |
+| Life and mana | The hero's object (run-time, the hero's template) and each companion's: the `aspect` component's `life` and `mana`. A value not found starts full |
+| Tips | `/uigame/tutorial_tips`; an import with a world doesn't replay SiegeFX's intro tips |
 | Companions | Other members; each joins on its own map placement when exactly one saved object has its template, otherwise as a new actor; it stands beside the hero |
 | Quests | `m_quests`: active or completed |
 | Flags | Auditor entries holding a yes/no value, as named world bools |
