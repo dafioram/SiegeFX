@@ -59,10 +59,16 @@ static class SaveCommands
         Console.WriteLine($"  hero       : {p.HeroName} ({p.Variant?.Gender})  level {p.Level}  xp {p.TotalXp}  " +
                           $"str {p.Strength:0.#} dex {p.Dexterity:0.#} int {p.Intelligence:0.#}  gold {p.Gold}");
         Console.WriteLine($"  skill xp   : melee {p.SkillXp[0]}  ranged {p.SkillXp[1]}  nature {p.SkillXp[2]}  combat {p.SkillXp[3]}");
-        Console.WriteLine($"  items      : {p.Inventory.Count(e => e.Slot.Length == 0)} in the pack, " +
-                          $"worn: {string.Join(", ", p.Inventory.Where(e => e.Slot.Length > 0).Select(e => $"{e.Slot["equipped:".Length..]}={e.Reference}"))}");
+        Console.WriteLine($"  worn       : {string.Join(", ", p.Inventory.Where(e => e.Slot.Length > 0).Select(e => $"{e.Slot["equipped:".Length..]}={e.Reference}"))}");
+        Console.WriteLine($"  pack       : {string.Join(", ", p.Inventory.Where(e => e.Slot.Length == 0).Select(e => e.Reference))}");
+        var heroRow = save.Actors.FirstOrDefault(a => a.Scid == OriginalSaveImport.HeroScid);
+        if (heroRow is not null)
+            Console.WriteLine($"  vitals     : life {(heroRow.CurrentLife > 1e8f ? "full" : heroRow.CurrentLife.ToString("0.#"))}" +
+                              $"  mana {(heroRow.CurrentMana > 1e8f ? "full" : heroRow.CurrentMana.ToString("0.#"))}");
         if (p.Spellbook is { } b)
             Console.WriteLine($"  spells     : active {b.PrimarySpell ?? "-"} / {b.SecondarySpell ?? "-"}, book {string.Join(", ", b.Placed)}");
+        if (save.World is not null)
+            Console.WriteLine($"  tips       : {(save.TipsDisabled ? "off" : "on")} (the intro tips are not replayed)");
         foreach (var c in save.Party)
             Console.WriteLine($"  companion  : {c.TemplateName} (0x{c.Scid:x8})  xp {c.TotalXp}  {c.Inventory.Count} pack item(s), " +
                               $"worn: {string.Join(", ", c.Equipment.Select(kv => $"{kv.Key[3..]}={kv.Value}"))}");
