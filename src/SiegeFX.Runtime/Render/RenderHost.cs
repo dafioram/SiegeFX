@@ -44202,6 +44202,23 @@ void main()
                     CurrentMana = 1e9f,
                 });
         }
+        // Loot the original left on the ground, placed on its node the same way.
+        // A pile whose node isn't in this region's layout is dropped rather
+        // than restored at the world origin.
+        int lootPlaced = 0, lootDropped = 0;
+        for (int i = save.LootPiles.Count - 1; i >= 0; i--)
+        {
+            var pile = save.LootPiles[i];
+            if (pile.Node == 0) continue;
+            if (_regionLayout is not null && _regionLayout.TryGetTransform(pile.Node, out var pileNode))
+            {
+                pile.Position = SiegeFX.Core.Save.Vec3.From(Vector3.Transform(pile.NodeOffset.ToVector3(), pileNode));
+                lootPlaced++;
+            }
+            else { save.LootPiles.RemoveAt(i); lootDropped++; }
+        }
+        if (lootPlaced + lootDropped > 0)
+            Console.WriteLine($"  load: imported loot — {lootPlaced} pile(s) placed, {lootDropped} on nodes outside this region dropped");
         int ring = 0;
         foreach (var cs in save.Party)
         {
