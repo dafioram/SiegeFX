@@ -12003,6 +12003,16 @@ static int CmdUiHeadUv(string[] a)
                 covered.Add($"{hn[(hn.LastIndexOf('_') + 1)..]}={100 * on / crest}%");
             }
             Console.WriteLine($"      hair painted on the crest: {string.Join(" ", covered)}");
+            // Alpha and color under each hair at the crest, alpha ignored: an
+            // overlay can carry color where its alpha is 0.
+            var under = new List<string>();
+            foreach (var (hn, hr, w, h) in hairTex)
+            {
+                long r = 0, g = 0, b = 0, al = 0;
+                foreach (var uv in crestUvs) { int t = Texel(uv, w, h); r += hr[t]; g += hr[t + 1]; b += hr[t + 2]; al += hr[t + 3]; }
+                under.Add($"{hn[(hn.LastIndexOf('_') + 1)..]}=#{r / crest:X2}{g / crest:X2}{b / crest:X2}/a{al / crest}");
+            }
+            Console.WriteLine($"      hair rgb/alpha at the crest: {string.Join(" ", under)}");
         }
 
         void Wire(byte[] src, int w, int h, string file)
@@ -12036,6 +12046,49 @@ static int CmdUiHeadUv(string[] a)
             if (own is not null) Wire(own, ow, oh, $"{name}_on_{m.TextureNames[0]}.png");
         }
     }
+    // Contact sheets: every hair overlay over grey, the same with alpha
+    // ignored, its alpha alone, and every skin base; cells in name order.
+    void Sheet(List<string> names, string file, int mode)
+    {
+        const int cell = 256, cols = 6;
+        int rows = (names.Count + cols - 1) / cols;
+        if (rows == 0) return;
+        var img = new byte[cols * cell * rows * cell * 4];
+        for (int i = 3; i < img.Length; i += 4) img[i] = 255;
+        for (int n = 0; n < names.Count; n++)
+        {
+            var src = Load(names[n], out int w, out int h);
+            if (src is null || w == 0 || h == 0) continue;
+            int ox = n % cols * cell, oy = n / cols * cell;
+            for (int y = 0; y < cell; y++)
+            for (int x = 0; x < cell; x++)
+            {
+                int si = ((y * h / cell) * w + x * w / cell) * 4;
+                int di = ((oy + y) * cols * cell + ox + x) * 4;
+                float al = src[si + 3] / 255f;
+                for (int k = 0; k < 3; k++)
+                    img[di + k] = mode switch
+                    {
+                        0 => (byte)(src[si + k] * al + 128 * (1 - al)),
+                        1 => src[si + k],
+                        _ => src[si + 3],
+                    };
+            }
+        }
+        using var fs = File.Create(Path.Combine(outDir, file));
+        Png.EncodeRgba(fs, img, cols * cell, rows * cell);
+    }
+    var skins = resolver.BasenamesWithPrefix($"b_c_{av}_skin_")
+        .Where(b => b.EndsWith(".raw", StringComparison.OrdinalIgnoreCase))
+        .Select(b => b[..^4]).Distinct(StringComparer.OrdinalIgnoreCase)
+        .Where(b => b.Length - b.LastIndexOf('_') - 1 == 3)
+        .Order(StringComparer.OrdinalIgnoreCase).ToList();
+    Sheet(hairs, "sheet_hair.png", 0);
+    Sheet(hairs, "sheet_hair_rgb.png", 1);
+    Sheet(hairs, "sheet_hair_alpha.png", 2);
+    Sheet(skins, "sheet_skin.png", 1);
+    Console.WriteLine($"sheets (6 per row, name order): hair {string.Join(" ", hairs.Select(h => h[(h.LastIndexOf('_') + 1)..]))}; " +
+                      $"skin {string.Join(" ", skins.Select(h => h[(h.LastIndexOf('_') + 1)..]))}");
     Console.WriteLine($"wrote PNGs to {Path.GetFullPath(outDir)}");
 
     if (logic.Length > 0)
