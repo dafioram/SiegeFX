@@ -151,6 +151,7 @@ static void PrintUsage()
     Console.WriteLine("  siegefx audio sed-list     <Sound.dsres> [--filter=PREFIX] [--show-all|--show-aliases|--show-rate-only]");
     Console.WriteLine("  siegefx mood list          <Logic.dsres> [--map=world] [--with-bed] [--regions]");
     Console.WriteLine("  siegefx ui mesh-info       <Objects.dsres> <mesh-basename>");
+    Console.WriteLine("  siegefx ui head-meshes     <Objects.dsres> [armor_version]   (the hero's body against each creator head mesh)");
     Console.WriteLine();
     Console.WriteLine("Examples:");
     Console.WriteLine("  siegefx tank info Objects.dsres");
@@ -11565,6 +11566,7 @@ static int DispatchUi(string[] a)
     return a[0].ToLowerInvariant() switch
     {
         "mesh-info" => CmdUiMeshInfo(a[1..]),
+        "head-meshes" => CmdUiHeadMeshes(a[1..]),
         "tips"      => CmdUiTips(a[1..]),
         _           => UnknownCommand("ui " + a[0]),
     };
@@ -12017,6 +12019,57 @@ static int CmdMusicPlay(string[] a)
     music.Stop();
     engine.Dispose();
     Console.WriteLine($"  done after {(DateTime.UtcNow - started).TotalSeconds:F1}s");
+    return 0;
+}
+
+/// <summary>`ui head-meshes` — the hero's body mesh against every head mesh
+/// the original's character creator offers (the Head button saves
+/// <c>custom_head = m_c_&lt;armor_version&gt;_hlmt_head-NN</c>): for each, its
+/// triangles, how high it reaches, its textures, and which bones its geometry
+/// hangs on. Shows whether the body carries a head of its own (geometry on the
+/// head bone) or the head mesh is the whole head.</summary>
+static int CmdUiHeadMeshes(string[] a)
+{
+    if (a.Length < 1)
+    {
+        Console.Error.WriteLine("usage: siegefx ui head-meshes <Objects.dsres> [armor_version=gah_fb]");
+        return 1;
+    }
+    var av = a.Length > 1 ? a[1] : "gah_fb";
+    using var tank = SiegeFX.Core.Tank.TankFile.Open(a[0]);
+    var resolver = new SiegeFX.Core.Assets.AssetResolver();
+    resolver.Add(new SiegeFX.Core.Tank.TankReader(tank), Path.GetFileName(a[0]));
+    var heads = resolver.BasenamesWithPrefix($"m_c_{av}_hlmt_head")
+        .Where(b => b.EndsWith(".asp", StringComparison.OrdinalIgnoreCase))
+        .Select(b => b[..^4]).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToList();
+    Console.WriteLine($"head meshes for {av}: {heads.Count}");
+    foreach (var name in new[] { $"m_c_{av}_pos_a1" }.Concat(heads))
+    {
+        if (!resolver.TryLoadModel(name, out var bytes)) { Console.WriteLine($"  {name}: not found"); continue; }
+        var m = SiegeFX.Core.Assets.AspMesh.Load(bytes);
+        var perBone = new int[Math.Max(1, m.BoneCount)];
+        float yMin = float.MaxValue, yMax = float.MinValue;
+        for (int c = 0; c < m.Corners.Length; c++)
+        {
+            var p = m.Positions[m.Corners[c].VertexIndex];
+            yMin = MathF.Min(yMin, p.Y); yMax = MathF.Max(yMax, p.Y);
+            int primary = 0;
+            if (m.HasSkin && c < m.SkinWeights.Length)
+            {
+                var w = m.SkinWeights[c]; uint b = m.SkinBones[c]; float pw = -1f;
+                if (w.X > pw) { primary = (int)( b        & 0xFF); pw = w.X; }
+                if (w.Y > pw) { primary = (int)((b >>  8) & 0xFF); pw = w.Y; }
+                if (w.Z > pw) { primary = (int)((b >> 16) & 0xFF); pw = w.Z; }
+                if (w.W > pw) { primary = (int)((b >> 24) & 0xFF); }
+            }
+            if (primary < perBone.Length) perBone[primary]++;
+        }
+        Console.WriteLine($"  {name}: {m.TriangleCount} tris, {m.BoneCount} bones, Y {yMin:0.###}..{yMax:0.###}, " +
+                          $"textures [{string.Join(", ", m.TextureNames)}]");
+        var bones = Enumerable.Range(0, perBone.Length).Where(i => perBone[i] > 0)
+            .Select(i => $"{(i < m.BoneNames.Count ? m.BoneNames[i] : $"#{i}")}={perBone[i]}");
+        Console.WriteLine($"      corners by bone: {string.Join(" ", bones)}");
+    }
     return 0;
 }
 
