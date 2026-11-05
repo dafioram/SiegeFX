@@ -15563,6 +15563,16 @@ void main()
         return list;
     }
 
+    /// <summary>The hair index on a new head: the same hair when the new
+    /// head's list has it, else the first (the original's behavior).</summary>
+    private int HairOnNewHead(HeroVariantPicker oldPick, HeroVariantPicker newPick)
+    {
+        var hair = PickVariant(HairListFor(oldPick), oldPick.StyleIdx);
+        int idx = hair is null ? -1
+            : HairListFor(newPick).FindIndex(h => h.Equals(hair, StringComparison.OrdinalIgnoreCase));
+        return Math.Max(0, idx);
+    }
+
     /// <summary>The creator's starting hair for a gender on the first head:
     /// /config/character_defaults.gas texture_farmboy_hair /
     /// texture_farmgirl_hair (the girl's is red), else the first.</summary>
@@ -24569,6 +24579,7 @@ void main()
                 if (now == Hud.FrontendScene.ScreenState.CharacterSelect)
                 {
                     _creator.DefaultHair ??= DefaultHairIdx;
+                    _creator.HairOnNewHead ??= HairOnNewHead;
                     _creator.Reset();
                 }
             }
@@ -27954,6 +27965,7 @@ void main()
             _pendingSpawner = spawner;
             _pendingNavMesh = navMesh;
             _creator.DefaultHair ??= DefaultHairIdx;
+            _creator.HairOnNewHead ??= HairOnNewHead;
             _creator.Reset();
             // Phase 22-SC-MUSIC-B — kick the menu music as the creator
             // panel comes up. DS1's frontend track is s_m_frontend.mp3

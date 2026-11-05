@@ -66,6 +66,16 @@ internal sealed class CharacterCreatorPanel
 
     int StartHair(HeroGender g) => DefaultHair?.Invoke(g) ?? 0;
 
+    /// <summary>The hair index on a new head for the hair worn on the old
+    /// one: (old picker, new picker) → index in the new head's list.</summary>
+    public Func<HeroVariantPicker, HeroVariantPicker, int>? HairOnNewHead { get; set; }
+
+    HeroVariantPicker ChangeHead(int head)
+    {
+        var next = With(head: head);
+        return With(head: head, style: HairOnNewHead?.Invoke(Picker, next) ?? 0);
+    }
+
     int WrapHead(int idx) => HeadCount > 0 ? ((idx % HeadCount) + HeadCount) % HeadCount : Math.Max(0, idx);
 
     public HeroVariantPicker Picker { get; private set; } = new()
@@ -286,11 +296,11 @@ internal sealed class CharacterCreatorPanel
             // first hair of its set, as in the original.
             // Head cycles its choices both ways. The original's left button
             // never reaches bald (the last); ours walks the same list in
-            // reverse so left always undoes right. The Hair position carries
-            // over into the new head's list, as in the original (the farm
-            // girl stays red through every head).
-            case Action.HeadLeft:   Picker = With(head:  WrapHead(Picker.HeadIdx - 1)); break;
-            case Action.HeadRight:  Picker = With(head:  WrapHead(Picker.HeadIdx + 1)); break;
+            // reverse so left always undoes right. The hair stays when the
+            // new head offers it, else the new head's first, as in the
+            // original (the farm girl stays red through every head).
+            case Action.HeadLeft:   Picker = ChangeHead(WrapHead(Picker.HeadIdx - 1)); break;
+            case Action.HeadRight:  Picker = ChangeHead(WrapHead(Picker.HeadIdx + 1)); break;
             case Action.FaceLeft:   Picker = With(face:  Picker.FaceIdx  - 1); break;
             case Action.FaceRight:  Picker = With(face:  Picker.FaceIdx  + 1); break;
             case Action.HairLeft:   Picker = With(style: Picker.StyleIdx - 1); break;
