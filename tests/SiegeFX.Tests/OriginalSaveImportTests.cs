@@ -51,6 +51,8 @@ public class OriginalSaveImportTests
                             [6] { equip_slot = es_ring_0; inv_location = il_main; template_name = test_ring_a; }
                             [7] { equip_slot = es_ring_1; inv_location = il_main; template_name = test_ring_b; }
                             [8] { inv_location = il_somewhere_new; template_name = test_odd; }
+                            [9] { equip_slot = es_spellbook; inv_location = il_main; template_name = test_book; }
+                            [10] { grid_x = 287; grid_y = 30; inv_location = il_main; template_name = test_spell_c; }
                         }
                         [skills]
                         {
@@ -103,15 +105,22 @@ public class OriginalSaveImportTests
         """;
 
     /// <summary>A world tree with two quests, three flags, saved objects (the
-    /// ally's own placement, a map item carried in a pack) and two retired
-    /// placements.</summary>
+    /// ally's own placement with its life, a map item carried in a pack, the
+    /// hero with life and mana, the hero's spellbook and two spells in it)
+    /// and two retired placements, with tips switched off.</summary>
     static XferTree World()
     {
         static XferBuilder.Node Quest(string i, string name, bool active, bool done) => new(i, new XferBuilder.Node("_value",
             XferBuilder.Text("sname", name), XferBuilder.Bool("bactive", active), XferBuilder.Bool("bcompleted", done)));
         static XferBuilder.Node Flag(string i, string key, bool b, int n) => new(i, XferBuilder.Text("m_key", key),
             XferBuilder.Int("m_int", n), XferBuilder.Bool("m_bool", b), XferBuilder.Float("m_float", 0), XferBuilder.Text("m_string", ""));
+        static XferBuilder.Node Aspect(float life, float? mana) => new("m_componentcoll",
+            new XferBuilder.Node("0", XferBuilder.Text("_name", "physique"), XferBuilder.Float("life", 999)),
+            new XferBuilder.Node("1", [XferBuilder.Text("_name", "aspect"), XferBuilder.Float("life", life),
+                .. mana is { } m ? new[] { XferBuilder.Float("mana", m) } : []]));
+        const int RunTime = unchecked((int)0xfffffffe);
         var (idx, dat) = XferBuilder.Build(new XferBuilder.Node("",
+            new XferBuilder.Node("uigame", XferBuilder.Bool("tutorial_tips", false)),
             new XferBuilder.Node("world",
                 new XferBuilder.Node("m_pvictory", new XferBuilder.Node("m_quests",
                     Quest("0", "test_quest_open", true, false),
@@ -123,7 +132,16 @@ public class OriginalSaveImportTests
                     Flag("2", "test_kills", false, 9)))),
             new XferBuilder.Node("godb",
                 new XferBuilder.Node("m_globaldb",
-                    new XferBuilder.Node("0", XferBuilder.Int("m_scid", 0x01c00b40), XferBuilder.Text("m_datatemplate", "test_ally")),
+                    new XferBuilder.Node("0", XferBuilder.Int("m_scid", 0x01c00b40), XferBuilder.Text("m_datatemplate", "test_ally"),
+                        Aspect(42, null)),
+                    new XferBuilder.Node("3", XferBuilder.Int("m_goid", 0x09000087), XferBuilder.Int("m_scid", RunTime),
+                        XferBuilder.Text("m_datatemplate", "farmgirl"), Aspect(31.5f, 12)),
+                    new XferBuilder.Node("4", XferBuilder.Int("m_goid", 0x09000100), XferBuilder.Int("m_scid", RunTime),
+                        XferBuilder.Int("m_parent", 0x09000087), XferBuilder.Text("m_datatemplate", "test_book")),
+                    new XferBuilder.Node("5", XferBuilder.Int("m_goid", 0x09000101), XferBuilder.Int("m_scid", RunTime),
+                        XferBuilder.Int("m_parent", 0x09000100), XferBuilder.Text("m_datatemplate", "test_spell_c")),
+                    new XferBuilder.Node("6", XferBuilder.Int("m_goid", 0x09000102), XferBuilder.Int("m_scid", RunTime),
+                        XferBuilder.Int("m_parent", 0x09000100), XferBuilder.Text("m_datatemplate", "test_spell_d")),
                     new XferBuilder.Node("1", XferBuilder.Int("m_scid", 0x01c00274), XferBuilder.Text("m_datatemplate", "test_potion"),
                         XferBuilder.Bool("m_isinsideinventory", true)),
                     new XferBuilder.Node("2", XferBuilder.Int("m_scid", 0x01c005ca), XferBuilder.Text("m_datatemplate", "test_krug"))),
@@ -175,9 +193,11 @@ public class OriginalSaveImportTests
         Assert.Equal("test_bow", Worn("ranged_weapon"));
         Assert.Equal("test_ring_a", Worn("ring"));
         Assert.Equal("test_ring_b", Worn("ring_1"));
+        // test_spell_c sits in the book in the world tree, so it leaves the pack.
         Assert.Equal(["test_potion", "test_odd"], p.Inventory.Where(e => e.Slot == "").Select(e => e.Reference));
+        Assert.Equal("test_book", Worn("spellbook"));
         Assert.Equal("test_spell_a", p.Spellbook!.PrimarySpell);
-        Assert.Equal(["test_spell_b"], p.Spellbook.Placed);
+        Assert.Equal(["test_spell_b", "test_spell_c", "test_spell_d"], p.Spellbook.Placed);
         Assert.Contains(r.Notes, n => n.Contains("il_somewhere_new"));
         Assert.Contains(r.Notes, n => n.Contains("test_skin_03"));
     }
@@ -192,7 +212,6 @@ public class OriginalSaveImportTests
         Assert.Equal((0, 0, 0), (ally.MoveOrder, ally.AtkOrder, ally.TgtOrder));
         Assert.Equal("test_axe", ally.Equipment["es_weapon_hand"]);
         Assert.Equal(["test_bread"], ally.Inventory.Select(e => e.Reference));   // worn gear stays out of the pack
-        Assert.True(ally.CurrentLife > 1e6f);
         Assert.Equal(default, ally.Position);   // the game stands them beside the hero
         Assert.Equal((OriginalSaveImport.ImportedCompanionScidBase + 2, 2), (mule.Scid, mule.PartyIndex));
         Assert.Contains(r.Notes, n => n.Contains("'Mule'"));
@@ -206,10 +225,23 @@ public class OriginalSaveImportTests
                      s.Player!.Quests.Select(q => (q.Key, q.State)));
         Assert.Equal(new Dictionary<string, bool> { ["test_talked"] = true, ["test_not_yet"] = false }, s.World!.Bools);
         Assert.Equal([(0x01c00008u, ""), (0x01c005cau, "test_krug")],
-                     s.Actors.Select(a => (a.Scid, a.TemplateName)));
-        Assert.All(s.Actors, a => Assert.True(a.IsDead));
+                     s.Actors.Where(a => a.IsDead).Select(a => (a.Scid, a.TemplateName)));
         // Retired placements and the map item carried in the pack stay gone.
         Assert.Equal([0x01c00008u, 0x01c00274u, 0x01c005cau], s.Player.ConsumedInventoryScids);
+    }
+
+    [Fact]
+    public void Life_mana_and_tips_come_from_the_world()
+    {
+        var s = Import(world: World()).Save;
+        var hero = Assert.Single(s.Actors, a => a.Scid == OriginalSaveImport.HeroScid);
+        Assert.Equal((31.5f, 12f, false), (hero.CurrentLife, hero.CurrentMana, hero.IsDead));
+        Assert.Equal(default, hero.Position);   // the game places it from SpawnNode
+        Assert.Equal(42f, s.Party[0].CurrentLife);
+        Assert.True(s.Party[0].CurrentMana > 1e6f);   // no mana saved: full
+        Assert.True(s.Party[1].CurrentLife > 1e6f);   // the mule has no object: full
+        Assert.True(s.TipsDisabled);
+        Assert.Equal(15, s.NextTipIndex);
     }
 
     [Fact]
@@ -220,6 +252,7 @@ public class OriginalSaveImportTests
         Assert.Equal(0u, r.Save.Player!.SpawnNode);
         Assert.Empty(r.Save.Actors);
         Assert.Null(r.Save.World);
+        Assert.Equal((0, false), (r.Save.NextTipIndex, r.Save.TipsDisabled));   // a new campaign keeps the tips
         Assert.Contains(r.Notes, n => n.Contains("no world"));
     }
 

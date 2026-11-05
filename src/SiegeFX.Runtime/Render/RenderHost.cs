@@ -44447,11 +44447,26 @@ void main()
         if (_player is null) return;
         uint heroScid = _player.Actor.Instance.Scid;
         var heroPos = _playerFollower?.Position ?? _player.CurrentTransform.Translation;
-        if (save.Player is { SpawnNode: not 0 } ps && !save.Actors.Any(a => a.Scid == heroScid))
+        // The importer writes the hero's row with the original's life and
+        // mana but no position (none without the layout); a .dsparty has none.
+        var heroRow = save.Actors.FirstOrDefault(a => a.Scid == heroScid);
+        if (heroRow is null || heroRow.Position == default)
         {
-            if (_regionLayout is not null && _regionLayout.TryGetTransform(ps.SpawnNode, out var nodeWorld))
+            bool placed = false;
+            if (save.Player is { SpawnNode: not 0 } ps)
             {
-                heroPos = Vector3.Transform(ps.SpawnOffset.ToVector3(), nodeWorld);
+                if (_regionLayout is not null && _regionLayout.TryGetTransform(ps.SpawnNode, out var nodeWorld))
+                {
+                    heroPos = Vector3.Transform(ps.SpawnOffset.ToVector3(), nodeWorld);
+                    placed = true;
+                    Console.WriteLine($"  load: imported hero on node 0x{ps.SpawnNode:x8} -> ({heroPos.X:F1},{heroPos.Y:F1},{heroPos.Z:F1})");
+                }
+                else
+                    Console.WriteLine($"  load: imported hero's node 0x{ps.SpawnNode:x8} is not in this region's layout; the hero starts at the region spawn");
+            }
+            if (heroRow is not null)
+                heroRow.Position = SiegeFX.Core.Save.Vec3.From(heroPos);   // the spawn's spot when unplaced
+            else if (placed)
                 // Life and mana above any cap: the restore clamps them to full.
                 save.Actors.Insert(0, new SiegeFX.Core.Save.ActorSnapshot
                 {
@@ -44461,10 +44476,6 @@ void main()
                     CurrentLife = 1e9f,
                     CurrentMana = 1e9f,
                 });
-                Console.WriteLine($"  load: imported hero on node 0x{ps.SpawnNode:x8} -> ({heroPos.X:F1},{heroPos.Y:F1},{heroPos.Z:F1})");
-            }
-            else
-                Console.WriteLine($"  load: imported hero's node 0x{ps.SpawnNode:x8} is not in this region's layout; the hero starts at the region spawn");
         }
         int ring = 0;
         foreach (var cs in save.Party)
