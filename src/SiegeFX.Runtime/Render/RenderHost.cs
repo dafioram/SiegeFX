@@ -43428,6 +43428,72 @@ void main()
         return null;
     }
 
+    /// <summary>A save converted from the original game names the hero's
+    /// spot as a terrain node and an offset inside it, and saves no position
+    /// for companions. Turns the node spot into the hero's actor row (the
+    /// region layout only exists once the region is up), and stands each
+    /// companion in a ring beside the hero.</summary>
+    private void PlaceImportedParty(SiegeFX.Core.Save.SaveFile save)
+    {
+        if (_player is null) return;
+        uint heroScid = _player.Actor.Instance.Scid;
+        var heroPos = _playerFollower?.Position ?? _player.CurrentTransform.Translation;
+        // The importer writes the hero's row with the original's life and
+        // mana but no position (none without the layout); a .dsparty has none.
+        var heroRow = save.Actors.FirstOrDefault(a => a.Scid == heroScid);
+        if (heroRow is null || heroRow.Position == default)
+        {
+            bool placed = false;
+            if (save.Player is { SpawnNode: not 0 } ps)
+            {
+                if (_regionLayout is not null && _regionLayout.TryGetTransform(ps.SpawnNode, out var nodeWorld))
+                {
+                    heroPos = Vector3.Transform(ps.SpawnOffset.ToVector3(), nodeWorld);
+                    placed = true;
+                    Console.WriteLine($"  load: imported hero on node 0x{ps.SpawnNode:x8} -> ({heroPos.X:F1},{heroPos.Y:F1},{heroPos.Z:F1})");
+                }
+                else
+                    Console.WriteLine($"  load: imported hero's node 0x{ps.SpawnNode:x8} is not in this region's layout; the hero starts at the region spawn");
+            }
+            if (heroRow is not null)
+                heroRow.Position = SiegeFX.Core.Save.Vec3.From(heroPos);   // the spawn's spot when unplaced
+            else if (placed)
+                // Life and mana above any cap: the restore clamps them to full.
+                save.Actors.Insert(0, new SiegeFX.Core.Save.ActorSnapshot
+                {
+                    Scid = heroScid,
+                    TemplateName = _player.Actor.Template.Name,
+                    Position = SiegeFX.Core.Save.Vec3.From(heroPos),
+                    CurrentLife = 1e9f,
+                    CurrentMana = 1e9f,
+                });
+        }
+        // Loot the original left on the ground, placed on its node the same way.
+        // A pile whose node isn't in this region's layout is dropped rather
+        // than restored at the world origin.
+        int lootPlaced = 0, lootDropped = 0;
+        for (int i = save.LootPiles.Count - 1; i >= 0; i--)
+        {
+            var pile = save.LootPiles[i];
+            if (pile.Node == 0) continue;
+            if (_regionLayout is not null && _regionLayout.TryGetTransform(pile.Node, out var pileNode))
+            {
+                pile.Position = SiegeFX.Core.Save.Vec3.From(Vector3.Transform(pile.NodeOffset.ToVector3(), pileNode));
+                lootPlaced++;
+            }
+            else { save.LootPiles.RemoveAt(i); lootDropped++; }
+        }
+        if (lootPlaced + lootDropped > 0)
+            Console.WriteLine($"  load: imported loot — {lootPlaced} pile(s) placed, {lootDropped} on nodes outside this region dropped");
+        int ring = 0;
+        foreach (var cs in save.Party)
+        {
+            if (cs.Position != default) continue;
+            float a = ring++ * (MathF.PI * 2f / 6f);
+            cs.Position = SiegeFX.Core.Save.Vec3.From(heroPos + new Vector3(MathF.Cos(a) * 1.5f, 0f, MathF.Sin(a) * 1.5f));
+        }
+    }
+
     // Phase 19b — patch a captured SaveFile back onto the live scene. Assumes
     // the same region is loaded (LoadPlayActors already ran), and the live
     // _actors list overlaps with save.Actors by Scid. Actors present in the
@@ -43444,6 +43510,11 @@ void main()
                 $"(boot '{_regionPath}') — this load needs the relaunch path");
             return;
         }
+        // An import from the original game carries no camera or facing, and
+        // its hero's spot as a terrain node: place the party first, so the
+        // re-anchor and actor patch below treat it like any other save.
+        bool imported = !string.IsNullOrEmpty(save.ImportedFrom);
+        if (imported) PlaceImportedParty(save);
         // SC-LOAD-DIAG — end-to-end receipts for every load. One block at
         // entry, per-companion outcomes below, a summary at the end; the
         // underground/region machinery logs its own decisions.
@@ -43952,7 +44023,8 @@ void main()
                 }
                 _progression.RestoreGoldFromSave(ps.Gold);
             }
-            _playerFacing = ps.Facing.ToVector3();
+            // An import keeps the spawn's facing and the default camera.
+            if (!imported) _playerFacing = ps.Facing.ToVector3();
             // 9-SC-10b — same reseed as on spawn so the body doesn't smear from
             // its pre-load position to the loaded one over a single tick.
             _playerRenderInit = false;
@@ -43960,13 +44032,16 @@ void main()
                 _playerRenderPosPrev = _playerRenderPosNext = _playerFollower.Position;
                 _playerRenderYInit = false;
             _playerRenderFacingPrev = _playerRenderFacingNext = _playerFacing;
-            _cameraMode   = (CameraMode)ps.CameraMode;
-            _chaseYaw     = ps.ChaseYaw;
-            _chaseDistance = ps.ChaseDistance;
-            _chaseHeight  = ps.ChaseHeight;
-            _camera.Position = ps.CameraPos.ToVector3();
-            _camera.Yaw   = ps.CameraYaw;
-            _camera.Pitch = ps.CameraPitch;
+            if (!imported)
+            {
+                _cameraMode   = (CameraMode)ps.CameraMode;
+                _chaseYaw     = ps.ChaseYaw;
+                _chaseDistance = ps.ChaseDistance;
+                _chaseHeight  = ps.ChaseHeight;
+                _camera.Position = ps.CameraPos.ToVector3();
+                _camera.Yaw   = ps.CameraYaw;
+                _camera.Pitch = ps.CameraPitch;
+            }
 
             _playerInventory.Clear();
             _playerEquipment.Clear();
