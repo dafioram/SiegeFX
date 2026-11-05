@@ -56,6 +56,12 @@ internal sealed class CharacterCreatorPanel
     /// through to env-var defaults.</summary>
     public bool Cancelled { get; set; }
 
+    /// <summary>How many choices the Head button has (the head meshes plus
+    /// the body's own, bald head); 0 = not known yet, no clamp.</summary>
+    public int HeadCount { get; set; }
+
+    int ClampHead(int idx) => HeadCount > 0 ? Math.Clamp(idx, 0, HeadCount - 1) : idx;
+
     public HeroVariantPicker Picker { get; private set; } = new()
     {
         Gender = HeroGender.Boy,
@@ -267,8 +273,12 @@ internal sealed class CharacterCreatorPanel
             case Action.GenderRight:
                 Picker = With(g: Toggle(Picker.Gender));
                 break;
-            case Action.HeadLeft:   Picker = With(head:  Picker.HeadIdx  - 1); break;
-            case Action.HeadRight:  Picker = With(head:  Picker.HeadIdx  + 1); break;
+            // Each head has its own hair set, so a new head starts on the
+            // first hair of its set, as in the original.
+            // Head stops at its ends rather than wrapping, as in the original
+            // (bald, the last, is reached only going right).
+            case Action.HeadLeft:   Picker = With(head:  ClampHead(Picker.HeadIdx - 1), style: 0); break;
+            case Action.HeadRight:  Picker = With(head:  ClampHead(Picker.HeadIdx + 1), style: 0); break;
             case Action.FaceLeft:   Picker = With(face:  Picker.FaceIdx  - 1); break;
             case Action.FaceRight:  Picker = With(face:  Picker.FaceIdx  + 1); break;
             case Action.HairLeft:   Picker = With(style: Picker.StyleIdx - 1); break;
