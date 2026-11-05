@@ -175,7 +175,7 @@ public class OriginalSaveImportTests
     public void The_hero_keeps_xp_attributes_gold_orders_and_gender()
     {
         var p = Import(world: World()).Save.Player!;
-        Assert.Equal((425L, 3), (p.TotalXp, p.Level));
+        Assert.Equal((425L, 4), (p.TotalXp, p.Level));   // uber_level 3.7, counted from 1
         Assert.Equal([120L, 301L, 0L, 4L], p.SkillXp);   // Melee, Ranged, NatureMagic, CombatMagic
         Assert.Equal((12f, 13.5f, 10.25f), (p.Strength, p.Dexterity, p.Intelligence));
         Assert.Equal(77L, p.Gold);
