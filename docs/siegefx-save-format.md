@@ -49,6 +49,15 @@ needs the migration whitelist in `SaveStore.Load` extended too.
 | World (`World`) | named bools, accumulators, opened chests, unlocked usables, levers, doors, generators, stairwells, auto-traps, active emitters, broken props, cleared blockers, elevators, every trigger's state (fired/held rows, delayed actions), party formation, hired companions, time of day |
 | Other | loot piles on the ground, active spell effects |
 
+## Imported saves
+
+A save converted from the original game (`siegefx save import`) sets
+`ImportedFrom` to the original file's path and gives the hero's spot as
+`Player.SpawnNode` (a terrain node) and `Player.SpawnOffset` (the offset in
+it) instead of an actor row. The load builds the hero's row from them, stands
+companions with no position beside the hero, and keeps the game's camera and
+facing. Once the game saves again, the file is an ordinary SiegeFX save.
+
 ## Known gaps
 
 - The hero's Field Commands orders: only companions carry them
