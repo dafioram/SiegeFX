@@ -70,6 +70,9 @@ public static class OriginalSaveImport
             notes.Add("thumbnail: not a bitmap this importer reads (24- or 32-bit uncompressed); left out");
 
         var objects = world is null ? new Dictionary<uint, XferNode>() : OriginalWorldFacts.ObjectsByScid(world);
+        var allObjects = world?.Find(OriginalWorldFacts.ObjectsPath)?.Children.ToList() ?? [];
+        // The hero is an object made at run time (no map SCID) of the hero's template.
+        var heroObject = Unique(allObjects, o => o.Value("m_scid")?.AsUInt32 == RunTimeScid && IsTemplate(o, hero.TemplateName));
 
         // ── The hero ───────────────────────────────────────────────────────
         var p = new PlayerSnapshot
@@ -100,9 +103,46 @@ public static class OriginalSaveImport
         if (hero.Skins.Count > 0)
             notes.Add($"hero: appearance not carried, only the gender ({p.Variant.Gender}); original skins: {string.Join(" / ", hero.Skins)}");
         var spells = new SpellbookSnapshot();
-        p.Inventory.AddRange(Items(hero, $"hero '{hero.ScreenName}'", notes, spells, out _));
+        p.Inventory.AddRange(Items(hero, $"hero '{hero.ScreenName}'", notes, spells, out var heroWorn));
+        // The party file lists the worn spellbook but not the spells in it;
+        // those are objects whose parent is the book, in the world tree.
+        if (heroWorn.TryGetValue("es_spellbook", out var bookTemplate) && heroObject?.Value("m_goid")?.AsUInt32 is uint heroGoid)
+        {
+            var book = Unique(allObjects, o => o.Value("m_parent")?.AsUInt32 == heroGoid && IsTemplate(o, bookTemplate));
+            if (book?.Value("m_goid")?.AsUInt32 is uint bookGoid)
+            {
+                var inBook = allObjects.Where(o => o.Value("m_parent")?.AsUInt32 == bookGoid)
+                                       .Select(o => o.Value("m_datatemplate")?.AsText ?? "")
+                                       .Where(t => t.Length > 0).ToList();
+                foreach (var spell in inBook)
+                {
+                    if (spell == spells.PrimarySpell || spell == spells.SecondarySpell || spells.Placed.Contains(spell)) continue;
+                    if (spells.PrimarySpell is null) spells.PrimarySpell = spell;
+                    else spells.Placed.Add(spell);
+                    // A spell the party file also listed loose stays in the book only.
+                    int loose = p.Inventory.FindIndex(e => e.Slot.Length == 0 && e.Reference == spell);
+                    if (loose >= 0) p.Inventory.RemoveAt(loose);
+                }
+                notes.Add($"hero: {inBook.Count} spell(s) in {bookTemplate}: {string.Join(", ", inBook)}" +
+                          (inBook.Count > 0 ? $" (the first is Active Spell 1)" : ""));
+            }
+            else
+                notes.Add($"hero: {bookTemplate} not found in the world tree; the spells in it are not carried");
+        }
         if (spells.PrimarySpell is not null || spells.SecondarySpell is not null || spells.Placed.Count > 0)
             p.Spellbook = spells;
+        // Life and mana as the original left them; the load clamps them to the
+        // new maximums. The game sets the row's position from SpawnNode.
+        if (heroObject is not null)
+        {
+            var (life, mana) = Vitals(heroObject);
+            file.Actors.Add(new ActorSnapshot { Scid = HeroScid, TemplateName = hero.TemplateName,
+                                                CurrentLife = life ?? Full, CurrentMana = mana ?? Full });
+            if (life is null || mana is null)
+                notes.Add($"hero: {(life is null ? "life" : "mana")} not found on the hero's object; starts full");
+        }
+        else if (world is not null)
+            notes.Add($"hero: no single {hero.TemplateName} object in the world tree; life and mana start full");
         if (info.Position is { } pos && hasWorld)
         {
             p.SpawnNode = pos.Node;
@@ -124,13 +164,16 @@ public static class OriginalSaveImport
             }
             usedScids.Add(scid);
             ApplyProgress(m, out var mXp, out _, out var mSkillXp);
+            var obj = objects.TryGetValue(scid, out var placed) ? placed
+                : Unique(allObjects, o => o.Value("m_scid")?.AsUInt32 == RunTimeScid && IsTemplate(o, m.TemplateName));
+            var (mLife, mMana) = obj is null ? (null, null) : Vitals(obj);
             var cs = new CompanionSnapshot
             {
                 Scid = scid,
                 TemplateName = m.TemplateName,
                 PartyIndex = partyIndex++,
-                CurrentLife = Full,
-                CurrentMana = Full,
+                CurrentLife = mLife ?? Full,
+                CurrentMana = mMana ?? Full,
                 TotalXp = mXp,
                 SkillXp = mSkillXp,
                 MoveOrder = m.Orders.MoveOrder,
@@ -168,6 +211,10 @@ public static class OriginalSaveImport
             if (counters > 0)
                 notes.Add($"world: {counters} auditor counter(s) not carried (kill counts, to-hit bonuses); SiegeFX has no matching state");
             file.World = ws;
+            // The original's own tips are behind the player: don't replay
+            // SiegeFX's from the first one. Its "show tips" option carries over.
+            file.NextTipIndex = 15;
+            file.TipsDisabled = OriginalWorldFacts.TutorialTips(world) == false;
 
             // Placements the original will not create again: dead actors stay
             // dead, and a picked-up or used-up map item stays gone.
@@ -261,6 +308,41 @@ public static class OriginalSaveImport
             rows.Add(new LootEntrySnapshot { Slot = "", Reference = it.TemplateName });
         }
         return rows;
+    }
+
+    /// <summary>The SCID the original gives objects made at run time.</summary>
+    const uint RunTimeScid = 0xfffffffe;
+
+    static bool IsTemplate(XferNode o, string template) =>
+        string.Equals(o.Value("m_datatemplate")?.AsText, template, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The one object matching, or null when none or several do.</summary>
+    static XferNode? Unique(IEnumerable<XferNode> objects, Func<XferNode, bool> match)
+    {
+        XferNode? found = null;
+        foreach (var o in objects)
+        {
+            if (!match(o)) continue;
+            if (found is not null) return null;
+            found = o;
+        }
+        return found;
+    }
+
+    /// <summary>Current life and mana from a creature's <c>aspect</c>
+    /// component (the <c>m_componentcoll</c> entry named <c>aspect</c>, which
+    /// holds <c>life</c> and <c>max_life</c>; <c>mana</c> is read the same way).
+    /// Null where the value isn't there.</summary>
+    public static (float? Life, float? Mana) Vitals(XferNode obj)
+    {
+        foreach (var comp in obj.Child("m_componentcoll")?.Children ?? [])
+        {
+            var nodes = comp.DescendantsAndSelf().ToList();
+            if (!nodes.Any(n => n.Value("_name")?.AsText == "aspect")) continue;
+            float? Find(string name) => nodes.Select(n => n.Value(name)?.AsSingle).FirstOrDefault(v => v is not null);
+            return (Find("life"), Find("mana"));
+        }
+        return (null, null);
     }
 
     /// <summary>The map SCID of the companion's own placement: the one saved
