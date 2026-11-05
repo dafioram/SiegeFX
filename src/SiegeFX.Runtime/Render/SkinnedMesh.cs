@@ -134,19 +134,24 @@ public sealed class SkinnedMesh : IDisposable
         _gl.BindBuffer(GLEnum.ElementArrayBuffer, 0);
     }
 
-    /// <summary>Mark the triangles that hang on <paramref name="boneIndex"/> (at
-    /// least two corners weighted mostly to it) for <see cref="HideMarked"/>:
-    /// the hero's own head, left out while a separate head mesh is drawn in
-    /// its place. Built once per mesh and bone.</summary>
+    /// <summary>Mark the triangles that hang on <paramref name="boneIndex"/> or
+    /// a bone below it (at least two corners weighted mostly to them) for
+    /// <see cref="HideMarked"/>: the hero's own head with anything hung off it
+    /// (the farm girl's ponytail), left out while a separate head mesh is
+    /// drawn in its place. Built once per mesh and bone.</summary>
     public void HideBoneTriangles(AspMesh mesh, int boneIndex)
     {
         if (boneIndex < 0 || _hiddenBone == boneIndex) return;
+        var hidden = BoneAndBelow(mesh, boneIndex);
         var indices = new uint[mesh.TriangleIndices.Length];
         for (int t = 0; t + 2 < indices.Length; t += 3)
         {
             int onBone = 0;
             for (int k = 0; k < 3; k++)
-                if (PrimaryBone(mesh, mesh.TriangleIndices[t + k]) == boneIndex) onBone++;
+            {
+                int b = PrimaryBone(mesh, mesh.TriangleIndices[t + k]);
+                if (b >= 0 && b < hidden.Length && hidden[b]) onBone++;
+            }
             for (int k = 0; k < 3; k++)
                 indices[t + k] = onBone >= 2 ? (uint)mesh.TriangleIndices[t] : (uint)mesh.TriangleIndices[t + k];
         }
@@ -160,6 +165,22 @@ public sealed class SkinnedMesh : IDisposable
         }
         _gl.BindBuffer(GLEnum.ElementArrayBuffer, 0);
         _hiddenBone = boneIndex;
+    }
+
+    /// <summary>A bone and every bone parented below it, as flags by index.</summary>
+    public static bool[] BoneAndBelow(AspMesh mesh, int boneIndex)
+    {
+        var set = new bool[Math.Max(mesh.BoneCount, boneIndex + 1)];
+        set[boneIndex] = true;
+        var parents = mesh.BoneParents;
+        for (bool grew = true; grew;)
+        {
+            grew = false;
+            for (int i = 0; i < parents.Length && i < set.Length; i++)
+                if (!set[i] && parents[i] >= 0 && parents[i] < set.Length && set[parents[i]])
+                    set[i] = grew = true;
+        }
+        return set;
     }
 
     /// <summary>The bone a corner is weighted to most.</summary>
