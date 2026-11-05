@@ -60,6 +60,12 @@ internal sealed class CharacterCreatorPanel
     /// the body's own, bald head); 0 = not known yet, no wrap.</summary>
     public int HeadCount { get; set; }
 
+    /// <summary>The starting hair index for a gender (its hair list on the
+    /// first head); null = the first.</summary>
+    public Func<HeroGender, int>? DefaultHair { get; set; }
+
+    int StartHair(HeroGender g) => DefaultHair?.Invoke(g) ?? 0;
+
     int WrapHead(int idx) => HeadCount > 0 ? ((idx % HeadCount) + HeadCount) % HeadCount : Math.Max(0, idx);
 
     public HeroVariantPicker Picker { get; private set; } = new()
@@ -135,6 +141,7 @@ internal sealed class CharacterCreatorPanel
             HairSuffix = "001",
             ShirtIdx = 0,
             PantsSuffix = "001",
+            StyleIdx = StartHair(HeroGender.Boy),
         };
         HeroName = "";
         _hovered = Action.None;
@@ -271,7 +278,9 @@ internal sealed class CharacterCreatorPanel
         {
             case Action.GenderLeft:
             case Action.GenderRight:
+                // The genders' hair lists differ; start on the new one's default.
                 Picker = With(g: Toggle(Picker.Gender));
+                Picker = With(style: StartHair(Picker.Gender));
                 break;
             // Each head has its own hair set, so a new head starts on the
             // first hair of its set, as in the original.
