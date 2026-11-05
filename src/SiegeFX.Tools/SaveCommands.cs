@@ -2,8 +2,9 @@ using System.Globalization;
 using SiegeFX.OriginalSaves;
 
 /// <summary><c>siegefx save</c> — read saves written by the original game
-/// (.dssave, .dsasave, .dsparty). Read-only. Format notes and the evidence
-/// behind every mapping: docs/original-save-format.md.</summary>
+/// (.dssave, .dsasave, .dsparty), and convert one into a SiegeFX save
+/// (<c>import</c>). The original's files are only ever read. Format notes and
+/// the evidence behind every mapping: docs/original-save-format.md.</summary>
 static class SaveCommands
 {
     const string Usage =
@@ -15,7 +16,9 @@ static class SaveCommands
         "                                                            only objects whose template or SCID matches, every value\n" +
         "       siegefx save locate  <World.dsmap> <0xSCID | template>  where a save object was placed in the map\n" +
         "       siegefx save retired <file> <World.dsmap> [--all]   map objects the game will not create again\n" +
-        "                                                            (smashed, killed, used up)";
+        "                                                            (smashed, killed, used up)\n" +
+        "       siegefx save import  <file> [--out=PATH]              convert into a SiegeFX save the Load Game window\n" +
+        "                                                            lists (default: SiegeFX's save folder)";
 
     public static int Dispatch(string[] a)
     {
@@ -33,9 +36,38 @@ static class SaveCommands
             "retired" when files.Count == 2 => Retired(OriginalSave.Open(files[0]), files[1], Flag("all")),
             "diff" when files.Count == 2 => Diff(OriginalSave.Open(files[0]), OriginalSave.Open(files[1]), Flag("all"),
                                                  (Opt("ignore") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries), Opt("object")),
+            "import" when files.Count == 1 => Import(OriginalSave.Open(files[0]), Opt("out")),
             _ => Fail(),
         };
         static int Fail() { Console.Error.WriteLine(Usage); return 1; }
+    }
+
+    // ── import ─────────────────────────────────────────────────────────────
+    static int Import(OriginalSave s, string? outPath)
+    {
+        OriginalSaveImportResult r;
+        try { r = OriginalSaveImport.Import(s, DateTime.Now); }
+        catch (NotSupportedException ex) { Console.Error.WriteLine(ex.Message); return 1; }
+        var save = r.Save;
+        var path = outPath ?? SiegeFX.Core.Save.SaveStore.NamedSavePath(save.DisplayName, DateTime.Now);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        SiegeFX.Core.Save.SaveStore.Save(path, save);
+        var p = save.Player!;
+        Console.WriteLine($"imported {Path.GetFileName(s.Path)} ({s.Kind}) -> {path}");
+        Console.WriteLine($"  shows as   : \"{save.DisplayName}\" in the Load Game window");
+        Console.WriteLine($"  region     : {save.RegionPath}{(p.SpawnNode != 0 ? $"   hero on node 0x{p.SpawnNode:x8} ({p.SpawnOffset.X:0.##}, {p.SpawnOffset.Y:0.##}, {p.SpawnOffset.Z:0.##})" : "")}");
+        Console.WriteLine($"  hero       : {p.HeroName} ({p.Variant?.Gender})  level {p.Level}  xp {p.TotalXp}  " +
+                          $"str {p.Strength:0.#} dex {p.Dexterity:0.#} int {p.Intelligence:0.#}  gold {p.Gold}");
+        Console.WriteLine($"  skill xp   : melee {p.SkillXp[0]}  ranged {p.SkillXp[1]}  nature {p.SkillXp[2]}  combat {p.SkillXp[3]}");
+        Console.WriteLine($"  items      : {p.Inventory.Count(e => e.Slot.Length == 0)} in the pack, " +
+                          $"worn: {string.Join(", ", p.Inventory.Where(e => e.Slot.Length > 0).Select(e => $"{e.Slot["equipped:".Length..]}={e.Reference}"))}");
+        if (p.Spellbook is { } b)
+            Console.WriteLine($"  spells     : active {b.PrimarySpell ?? "-"} / {b.SecondarySpell ?? "-"}, book {string.Join(", ", b.Placed)}");
+        foreach (var c in save.Party)
+            Console.WriteLine($"  companion  : {c.TemplateName} (0x{c.Scid:x8})  xp {c.TotalXp}  {c.Inventory.Count} pack item(s), " +
+                              $"worn: {string.Join(", ", c.Equipment.Select(kv => $"{kv.Key[3..]}={kv.Value}"))}");
+        foreach (var note in r.Notes) Console.WriteLine($"  note       : {note}");
+        return 0;
     }
 
     // ── inspect ────────────────────────────────────────────────────────────
