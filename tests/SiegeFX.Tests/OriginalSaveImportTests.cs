@@ -134,6 +134,9 @@ public class OriginalSaveImportTests
                 new XferBuilder.Node("m_globaldb",
                     new XferBuilder.Node("0", XferBuilder.Int("m_scid", 0x01c00b40), XferBuilder.Text("m_datatemplate", "test_ally"),
                         Aspect(42, null)),
+                    new XferBuilder.Node("7", XferBuilder.Int("m_scid", RunTime), XferBuilder.Text("m_datatemplate", "test_party"),
+                        new XferBuilder.Node("m_componentcoll", new XferBuilder.Node("1",
+                            new XferBuilder.Node("m_pformation", XferBuilder.Text("m_name", "wedge"))))),
                     new XferBuilder.Node("3", XferBuilder.Int("m_goid", 0x09000087), XferBuilder.Int("m_scid", RunTime),
                         XferBuilder.Text("m_datatemplate", "farmgirl"), Aspect(31.5f, 12)),
                     new XferBuilder.Node("4", XferBuilder.Int("m_goid", 0x09000100), XferBuilder.Int("m_scid", RunTime),
@@ -242,6 +245,24 @@ public class OriginalSaveImportTests
         Assert.True(s.Party[1].CurrentLife > 1e6f);   // the mule has no object: full
         Assert.True(s.TipsDisabled);
         Assert.Equal(15, s.NextTipIndex);
+    }
+
+    [Theory]
+    [InlineData("wedge", "Pyramid")]
+    [InlineData("circle", "Circle")]
+    [InlineData("double_line", "DoubleRow")]
+    [InlineData("line", "Row")]
+    [InlineData("double_column", "DoubleColumn")]
+    [InlineData("column", "Column")]
+    [InlineData("spiral", null)]
+    public void The_original_formation_names_map_to_siegefx(string original, string? siegefx) =>
+        Assert.Equal(siegefx, OriginalSaveImport.PartyFormation(original));
+
+    [Fact]
+    public void The_formation_comes_from_the_party_object()
+    {
+        Assert.Equal("wedge", OriginalWorldFacts.Formation(World()));
+        Assert.Equal("Pyramid", Import(world: World()).Save.World!.PartyFormation);
     }
 
     [Fact]
