@@ -286,9 +286,11 @@ internal sealed class CharacterCreatorPanel
             // first hair of its set, as in the original.
             // Head cycles its choices both ways. The original's left button
             // never reaches bald (the last); ours walks the same list in
-            // reverse so left always undoes right.
-            case Action.HeadLeft:   Picker = With(head:  WrapHead(Picker.HeadIdx - 1), style: 0); break;
-            case Action.HeadRight:  Picker = With(head:  WrapHead(Picker.HeadIdx + 1), style: 0); break;
+            // reverse so left always undoes right. The Hair position carries
+            // over into the new head's list, as in the original (the farm
+            // girl stays red through every head).
+            case Action.HeadLeft:   Picker = With(head:  WrapHead(Picker.HeadIdx - 1)); break;
+            case Action.HeadRight:  Picker = With(head:  WrapHead(Picker.HeadIdx + 1)); break;
             case Action.FaceLeft:   Picker = With(face:  Picker.FaceIdx  - 1); break;
             case Action.FaceRight:  Picker = With(face:  Picker.FaceIdx  + 1); break;
             case Action.HairLeft:   Picker = With(style: Picker.StyleIdx - 1); break;
