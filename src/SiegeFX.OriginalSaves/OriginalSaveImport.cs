@@ -231,9 +231,32 @@ public static class OriginalSaveImport
             foreach (var (scid, node) in objects)
                 if (node.Value("m_isinsideinventory")?.AsBool == true) gone.Add(scid);
             p.ConsumedInventoryScids = gone.ToList();
+            // Loot on the ground: objects made at run time that nobody holds,
+            // that the player can pick up (an item's gui component names its
+            // inventory icon) and that have a spot. Gold carries its amount.
+            foreach (var o in allObjects)
+            {
+                if (o.Value("m_scid")?.AsUInt32 != RunTimeScid || o.Value("m_parent")?.AsUInt32 is not 0) continue;
+                if (o.Value("m_isinsideinventory")?.AsBool == true) continue;
+                var comps = o.Child("m_componentcoll")?.Children.ToList() ?? [];
+                XferNode? Comp(string name) => comps.FirstOrDefault(c => c.Value("_name")?.AsText == name);
+                if (Comp("gui")?.Value("inventory_icon") is null) continue;
+                if (Comp("placement")?.Value("position") is not { } posValue || !TryNodePosition(posValue, out var node, out var offset))
+                    continue;
+                var template = o.Value("m_datatemplate")?.AsText ?? "";
+                if (template.Length == 0) continue;
+                var entry = string.Equals(template, "gold", StringComparison.OrdinalIgnoreCase)
+                    ? new LootEntrySnapshot { Slot = "gold", Reference = Amount(Comp("aspect")?.Value("gold_value")?.AsInt32 ?? 0) }
+                    : new LootEntrySnapshot { Slot = "", Reference = template };
+                file.LootPiles.Add(new LootPileSnapshot { Node = node, NodeOffset = offset, Entries = [entry] });
+            }
+            if (file.LootPiles.Count > 0)
+                notes.Add($"world: {file.LootPiles.Count} loot pile(s) on the ground: " +
+                          string.Join(", ", file.LootPiles.Select(l => l.Entries[0].Slot == "gold"
+                              ? $"{l.Entries[0].Reference.Split('-')[0]} gold" : l.Entries[0].Reference)));
             notes.Add($"world: {p.Quests.Count} quest(s), {ws.Bools.Count} flag(s), {retired.Count} retired placement(s), " +
                       $"{gone.Count - retired.Count} carried map item(s)");
-            notes.Add("world: doors, chests, levers and loot on the ground are not carried yet; they load as the map places them");
+            notes.Add("world: doors, chests and levers are not carried yet; they load as the map places them");
         }
         return new OriginalSaveImportResult(file, notes);
     }
@@ -330,6 +353,24 @@ public static class OriginalSaveImport
         "wedge" => "Pyramid",
         _ => null,
     };
+
+    static string Amount(int gold) => $"{gold}-{gold}";
+
+    /// <summary>A position value as the original stores it (16 bytes: x, y, z
+    /// as little-endian floats, then the terrain node id, stored in the reverse
+    /// of the byte order its text form reads).</summary>
+    public static bool TryNodePosition(XferValue v, out uint node, out Vec3 offset)
+    {
+        node = 0; offset = default;
+        if (v.Raw.Length != 16) return false;
+        var s = v.Raw.Span;
+        float x = BinaryPrimitives.ReadSingleLittleEndian(s), y = BinaryPrimitives.ReadSingleLittleEndian(s[4..]),
+              z = BinaryPrimitives.ReadSingleLittleEndian(s[8..]);
+        if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z)) return false;
+        node = BinaryPrimitives.ReadUInt32BigEndian(s[12..]);
+        offset = new Vec3(x, y, z);
+        return node != 0;
+    }
 
     /// <summary>The SCID the original gives objects made at run time.</summary>
     const uint RunTimeScid = 0xfffffffe;

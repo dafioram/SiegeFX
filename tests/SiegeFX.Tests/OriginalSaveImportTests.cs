@@ -119,6 +119,23 @@ public class OriginalSaveImportTests
             new XferBuilder.Node("1", [XferBuilder.Text("_name", "aspect"), XferBuilder.Float("life", life),
                 .. mana is { } m ? new[] { XferBuilder.Float("mana", m) } : []]));
         const int RunTime = unchecked((int)0xfffffffe);
+        static XferBuilder.Val Pos(float x, float y, float z, uint node)
+        {
+            var b = new byte[16];
+            BinaryPrimitives.WriteSingleLittleEndian(b, x);
+            BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(4), y);
+            BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(8), z);
+            BinaryPrimitives.WriteUInt32BigEndian(b.AsSpan(12), node);
+            return new XferBuilder.Val("position", b);
+        }
+        // An object made at run time lying in the world: placement, and a gui
+        // icon when it's an item (a monster has none).
+        static XferBuilder.Node Ground(string i, string template, bool item, uint node, params XferBuilder.Entry[] more) =>
+            new(i, [XferBuilder.Int("m_scid", RunTime), XferBuilder.Int("m_parent", 0), XferBuilder.Text("m_datatemplate", template),
+                new XferBuilder.Node("m_componentcoll", [
+                    new XferBuilder.Node("0", XferBuilder.Text("_name", "placement"), Pos(-7.25f, 0f, -11.75f, node)),
+                    .. item ? new[] { new XferBuilder.Node("1", XferBuilder.Text("_name", "gui"), XferBuilder.Text("inventory_icon", "icon")) } : [],
+                    .. more])]);
         var (idx, dat) = XferBuilder.Build(new XferBuilder.Node("",
             new XferBuilder.Node("uigame", XferBuilder.Bool("tutorial_tips", false)),
             new XferBuilder.Node("world",
@@ -134,6 +151,10 @@ public class OriginalSaveImportTests
                 new XferBuilder.Node("m_globaldb",
                     new XferBuilder.Node("0", XferBuilder.Int("m_scid", 0x01c00b40), XferBuilder.Text("m_datatemplate", "test_ally"),
                         Aspect(42, null)),
+                    Ground("8", "gold", true, 0xd037f9ef,
+                        new XferBuilder.Node("2", XferBuilder.Text("_name", "aspect"), XferBuilder.Int("gold_value", 6))),
+                    Ground("9", "test_dropped_sword", true, 0x0a0b0c0d),
+                    Ground("10", "test_krug_spawned", false, 0x0a0b0c0d),
                     new XferBuilder.Node("7", XferBuilder.Int("m_scid", RunTime), XferBuilder.Text("m_datatemplate", "test_party"),
                         new XferBuilder.Node("m_componentcoll", new XferBuilder.Node("1",
                             new XferBuilder.Node("m_pformation", XferBuilder.Text("m_name", "wedge"))))),
@@ -263,6 +284,17 @@ public class OriginalSaveImportTests
     {
         Assert.Equal("wedge", OriginalWorldFacts.Formation(World()));
         Assert.Equal("Pyramid", Import(world: World()).Save.World!.PartyFormation);
+    }
+
+    [Fact]
+    public void Loot_on_the_ground_becomes_piles_on_its_node()
+    {
+        var piles = Import(world: World()).Save.LootPiles;
+        Assert.Equal(2, piles.Count);   // the spawned monster isn't loot
+        Assert.Equal((0xd037f9efu, new Vec3(-7.25f, 0f, -11.75f)), (piles[0].Node, piles[0].NodeOffset));
+        Assert.Equal(("gold", "6-6"), (piles[0].Entries[0].Slot, piles[0].Entries[0].Reference));
+        Assert.Equal(("", "test_dropped_sword"), (piles[1].Entries[0].Slot, piles[1].Entries[0].Reference));
+        Assert.Equal(default, piles[0].Position);   // the game places it from the node
     }
 
     [Fact]
