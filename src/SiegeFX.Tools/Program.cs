@@ -12071,6 +12071,16 @@ static int CmdUiHeadMeshes(string[] a)
         var bones = Enumerable.Range(0, perBone.Length).Where(i => perBone[i] > 0)
             .Select(i => $"{(i < m.BoneNames.Count ? m.BoneNames[i] : $"#{i}")}={perBone[i]}");
         Console.WriteLine($"      corners by bone: {string.Join(" ", bones)}");
+        int headBone = -1;
+        for (int i = 0; i < m.BoneNames.Count; i++)
+            if (m.BoneNames[i].Equals("Bip01_Head", StringComparison.OrdinalIgnoreCase)) headBone = i;
+        if (headBone >= 0)
+        {
+            var below = Enumerable.Range(0, m.BoneCount)
+                .Where(i => i < m.BoneParents.Length && m.BoneParents[i] == headBone)
+                .Select(i => $"{m.BoneNames[i]}={perBone[i]}");
+            Console.WriteLine($"      bones parented to Bip01_Head: {string.Join(" ", below)}");
+        }
     }
     return 0;
 }
