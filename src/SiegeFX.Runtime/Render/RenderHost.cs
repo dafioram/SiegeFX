@@ -15524,25 +15524,39 @@ void main()
         return null;
     }
 
-    // The hair overlays come in two sets. Most paint only the scalp and face;
-    // a few (the farm boy's hair_007..010) also paint the strips below the
-    // face, where the mohawk and bun heads map their crests. The original
-    // offers each head only its own set (four hairs on the mohawk), so a
-    // crest never shows skin and a mohawk never gets a long-hair scalp.
+    // The creator offers the farm boy hair_001..010 (011 on are NPC hairs),
+    // in two sets: 001..006 paint the scalp and face, while 007..010 also
+    // paint the strips below the face that the mohawk and bun heads map
+    // their crests onto. The original gives each head its own set: the
+    // scalp set on the plain heads, the crest set on the mohawk and bun (so
+    // a crest never shows skin, a mohawk never a long-hair scalp), and both
+    // on the bald body head, crest set first. Read off the textures: the
+    // offered hairs run up to the last that paints the strips.
     private const float HairStripTopV = 0.6f;
     private readonly Dictionary<string, List<string>> _ccHairForHead = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The hair overlays the Hair button walks for the picker's head.</summary>
     private List<string> HairListFor(HeroVariantPicker picker)
     {
+        if (_ccHair.Count == 0 || HeadMeshList(picker) is null) return _ccHair;
         var head = HeadMeshFor(picker);
-        if (head is null || _ccHair.Count == 0) return _ccHair;
-        if (_ccHairForHead.TryGetValue(head, out var hit)) return hit;
-        bool crest = HeadReachesHairStrips(head);
-        var list = _ccHair.Where(h => HairPaintsStrips(h) == crest).ToList();
+        string key = head ?? $"bald:{picker.Gender}";
+        if (_ccHairForHead.TryGetValue(key, out var hit)) return hit;
+
+        var strips = _ccHair.Select(HairPaintsStrips).ToList();
+        int last = strips.FindLastIndex(v => v == true);
+        var scalp = new List<string>();
+        var crestSet = new List<string>();
+        for (int i = 0; i < _ccHair.Count && (last < 0 || i <= last); i++)
+        {
+            if (strips[i] is null) continue;
+            (strips[i] == true ? crestSet : scalp).Add(_ccHair[i]);
+        }
+        List<string> list = head is null ? crestSet.Concat(scalp).ToList()
+                          : HeadReachesHairStrips(head) ? crestSet : scalp;
         if (list.Count == 0) list = _ccHair;
-        _ccHairForHead[head] = list;
-        Console.WriteLine($"[cc-options] {head}: hair {string.Join(" ", list.Select(h => h[(h.LastIndexOf('_') + 1)..]))}");
+        _ccHairForHead[key] = list;
+        Console.WriteLine($"[cc-options] {head ?? "bald (body head)"}: hair {string.Join(" ", list.Select(h => h[(h.LastIndexOf('_') + 1)..]))}");
         return list;
     }
 
@@ -28251,6 +28265,7 @@ void main()
                         // between the stone wall and the frame.
                         _heroPreview.EnsurePreview(_creator.Picker);
                         _heroPreview.HeadMesh = HeadMeshFor(_creator.Picker);
+                        _creator.HeadCount = HeadChoiceCount(_creator.Picker);
                         _heroPreview.Tick(dt);
                     }
                     // Per-button asp render + hover overlays + name overlay.
@@ -29403,10 +29418,10 @@ void main()
     // Head meshes per armor_version (m_c_<av>_hlmt_head-*), sorted.
     private readonly Dictionary<string, List<string>> _headMeshLists = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The head mesh the creator's Head picks for a hero
-    /// (m_c_&lt;armor_version&gt;_hlmt_head-NN, the original's custom_head); null
-    /// when the template ships none.</summary>
-    private string? HeadMeshFor(HeroVariantPicker? picker)
+    /// <summary>The head meshes a hero's creator offers
+    /// (m_c_&lt;armor_version&gt;_hlmt_head-*, sorted); null when the template
+    /// ships none.</summary>
+    private List<string>? HeadMeshList(HeroVariantPicker? picker)
     {
         if (_templateStore is null || _playResolver is null) return null;
         string tplName = picker?.Gender == HeroGender.Girl ? "farmgirl" : "farmboy";
@@ -29421,7 +29436,23 @@ void main()
                 .OrderBy(b => b, StringComparer.OrdinalIgnoreCase).ToList();
             _headMeshLists[av] = list;
         }
-        return PickVariant(list, picker?.HeadIdx ?? 0);
+        return list.Count > 0 ? list : null;
+    }
+
+    /// <summary>The Head button's choices: the head meshes, then the body's
+    /// own head (bald; the original saves it as custom_head = default).</summary>
+    private int HeadChoiceCount(HeroVariantPicker? picker)
+        => HeadMeshList(picker) is { } list ? list.Count + 1 : 0;
+
+    /// <summary>The head mesh the creator's Head picks for a hero (the
+    /// original's custom_head); null for the body's own head, the last
+    /// choice, or when the template ships no head meshes.</summary>
+    private string? HeadMeshFor(HeroVariantPicker? picker)
+    {
+        var list = HeadMeshList(picker);
+        if (list is null) return null;
+        int idx = Math.Clamp(picker?.HeadIdx ?? 0, 0, list.Count);
+        return idx < list.Count ? list[idx] : null;
     }
 
     private void LoadPlayerHeadLayer(SiegeFX.Core.Assets.Template playerTemplate)
@@ -41686,6 +41717,7 @@ void main()
                         // between the stone wall and the frame.
                         _heroPreview.EnsurePreview(_creator.Picker);
                         _heroPreview.HeadMesh = HeadMeshFor(_creator.Picker);
+                        _creator.HeadCount = HeadChoiceCount(_creator.Picker);
                         _heroPreview.Tick((float)dt);
                     }
 
