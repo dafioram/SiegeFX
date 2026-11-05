@@ -423,6 +423,7 @@ any other save.
 | Spells in the worn book | `party.gas` lists the book but not the spells in it (seen in a DS1 save: the book worn, no spell rows). They are the objects whose `m_parent` is the book's `m_goid`, the book's own parent being the hero's goid; the first becomes Active Spell 1 |
 | Life and mana | The hero's object (run-time, the hero's template) and each companion's: the `aspect` component's `life` and `mana`. A value not found starts full |
 | Tips | `/uigame/tutorial_tips`; an import with a world doesn't replay SiegeFX's intro tips |
+| Formation | `m_pformation/m_name` on the party object (`/godb/m_globaldb/33/m_componentcoll/1/m_pformation` in one save; `"wedge"` → `"circle"` after switching formation, which also set `m_spotwidth`/`m_spotlength` 0 → 1): circle, column, double_column, line → Row, double_line → DoubleRow, wedge → Pyramid |
 | Companions | Other members; each joins on its own map placement when exactly one saved object has its template, otherwise as a new actor; it stands beside the hero |
 | Quests | `m_quests`: active or completed |
 | Flags | Auditor entries holding a yes/no value, as named world bools |

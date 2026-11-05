@@ -72,7 +72,10 @@ static class SaveCommands
         if (p.Spellbook is { } b)
             Console.WriteLine($"  spells     : active {b.PrimarySpell ?? "-"} / {b.SecondarySpell ?? "-"}, book {string.Join(", ", b.Placed)}");
         if (save.World is not null)
+        {
             Console.WriteLine($"  tips       : {(save.TipsDisabled ? "off" : "on")} (the intro tips are not replayed)");
+            Console.WriteLine($"  formation  : {(save.World.PartyFormation.Length > 0 ? save.World.PartyFormation : "(default)")}");
+        }
         foreach (var c in save.Party)
             Console.WriteLine($"  companion  : {c.TemplateName} (0x{c.Scid:x8})  xp {c.TotalXp}  {c.Inventory.Count} pack item(s), " +
                               $"worn: {string.Join(", ", c.Equipment.Select(kv => $"{kv.Key[3..]}={kv.Value}"))}");
