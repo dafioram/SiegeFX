@@ -383,6 +383,7 @@ siegefx save diff <a> <b> --object=door  # every value that changed on matching 
 siegefx save locate <World.dsmap> 0x01c00b13   # where a save object was placed in the map
 siegefx save locate <World.dsmap> edgaar       # placements by template name
 siegefx save retired <file> <World.dsmap>      # placements the game will not create again
+siegefx save import <file> [--out=PATH]        # convert into a SiegeFX save (see Importing)
 ```
 
 `retired` looks up every SCID in `m_retiredscidcoll` in the save's own map
@@ -404,6 +405,33 @@ still saved (corpses, mostly).
 4. value changes per world section, then the values themselves.
    `skritengine` and `godb` are positional lists (one new object shifts
    every later index), so they always show churn and are listed last.
+
+## Importing into SiegeFX
+
+`siegefx save import` (`OriginalSaveImport`) converts a save into a SiegeFX
+save, written to SiegeFX's save folder so the Load Game window lists it as
+`Original: <screen name>`. Loading it relaunches into the saved region like
+any other save.
+
+| Carried | From |
+|---|---|
+| Region, hero's spot | `info.gas` `map_name`, `region`, `teleport`: the save names the node and offset (`SpawnNode`, `SpawnOffset`) and the game resolves them against the region layout once it is up |
+| Hero name, gender, play time, thumbnail | `info.gas`; gender from the template (`farmboy` / `farmgirl`); `thumb.bmp` |
+| XP, level, attributes, skill XP | `[skills]`: `uber_xp`, `uber_level`, `strength/dexterity/intelligence_level`, `melee/ranged/nature_magic/combat_magic_xp` |
+| Gold, orders, active slot | `[party] gold`; the `*_orders`; `selected_active_location` |
+| Items | `[inventory]`: `equip_slot` → worn; `il_active_melee_weapon` / `il_active_ranged_weapon` → weapon hand / ranged slot; `il_active_*_spell`, `il_spell_*` → the spellbook; the rest → the pack |
+| Companions | Other members; each joins on its own map placement when exactly one saved object has its template, otherwise as a new actor; it stands beside the hero |
+| Quests | `m_quests`: active or completed |
+| Flags | Auditor entries holding a yes/no value, as named world bools |
+| What stays gone | Retired SCIDs as dead actors; retired and carried (`m_isinsideinventory`) map items as consumed pickups |
+
+Not carried yet: appearance beyond gender, item enchantments (the party file
+names only the base template), doors, chests, levers and other
+`m_scidbitscoll` state, loot on the ground, the auditor's counters. A
+`.dsparty` has no world, so its character starts the campaign at `fh_r1`.
+Legends of Aranna saves are refused. The importer prints a note for every
+item location it does not know, which is how the remaining
+`selected_active_location` and spell locations get confirmed.
 
 ## Open questions
 
