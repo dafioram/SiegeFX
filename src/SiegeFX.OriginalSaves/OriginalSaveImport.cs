@@ -244,7 +244,9 @@ public static class OriginalSaveImport
     static void ApplyProgress(OriginalPartyMember m, out long totalXp, out int level, out List<long> skillXp)
     {
         totalXp = (long)Math.Round(Xp(m, "uber"));
-        level = Math.Max(1, (int)Math.Floor(m.Level));
+        // The original counts levels from 0 (uber_level 0 at 0 XP), SiegeFX's
+        // level math from 1: the same XP is one level higher here.
+        level = Math.Max(1, (int)Math.Floor(m.Level) + 1);
         skillXp =
         [
             (long)Math.Round(Xp(m, "melee")),

@@ -417,7 +417,7 @@ any other save.
 |---|---|
 | Region, hero's spot | `info.gas` `map_name`, `region`, `teleport`: the save names the node and offset (`SpawnNode`, `SpawnOffset`) and the game resolves them against the region layout once it is up |
 | Hero name, gender, play time, thumbnail | `info.gas`; gender from the template (`farmboy` / `farmgirl`); `thumb.bmp` |
-| XP, level, attributes, skill XP | `[skills]`: `uber_xp`, `uber_level`, `strength/dexterity/intelligence_level`, `melee/ranged/nature_magic/combat_magic_xp` |
+| XP, level, attributes, skill XP | `[skills]`: `uber_xp`, `uber_level`, `strength/dexterity/intelligence_level`, `melee/ranged/nature_magic/combat_magic_xp`. The original counts levels from 0 (a new hero writes `melee_level = 0`, `uber_level = 0`; 0.0564 after one krug, 3.94 XP); SiegeFX's level math counts from 1, so the level is `floor(uber_level) + 1` |
 | Gold, orders, active slot | `[party] gold`; the `*_orders`; `selected_active_location` |
 | Items | `[inventory]`: `equip_slot` → worn; `il_active_melee_weapon` / `il_active_ranged_weapon` → weapon hand / ranged slot; `il_active_*_spell`, `il_spell_*` → the spellbook; the rest → the pack |
 | Spells in the worn book | `party.gas` lists the book but not the spells in it (seen in a DS1 save: the book worn, no spell rows). They are the objects whose `m_parent` is the book's `m_goid`, the book's own parent being the hero's goid; the first becomes Active Spell 1 |
