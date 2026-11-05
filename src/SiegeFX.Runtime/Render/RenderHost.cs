@@ -27417,6 +27417,27 @@ void main()
     /// <summary>SC-PICK-FADED + SC-PICK-YBAND — may the cursor resolve this
     /// actor from where the player stands? False when the actor is hidden
     /// with a faded-out layer OR standing a floor above/below.</summary>
+    /// <summary>You click what you see, for a barrel or a loot pile: false
+    /// when its room is faded out, or when terrain the camera treats as solid
+    /// stands between the camera and both heights given above its base. From
+    /// the farmhouse's upper floor the hammer cursor offered a barrel in the
+    /// basement 16u below, through the floor, and the hero set off down the
+    /// stairs to break it.</summary>
+    private bool VisibleToPick(Vector3 basePos, float low, float high)
+    {
+        if (IsPosInFadedSnode(basePos)) return false;
+        var eye = _camera.Position;
+        return !(Blocked(basePos + new Vector3(0f, low, 0f)) && Blocked(basePos + new Vector3(0f, high, 0f)));
+
+        bool Blocked(Vector3 p)
+        {
+            var d = p - eye;
+            float len = d.Length();
+            if (len < 1f) return false;
+            return CameraBoundsHitDistance(eye, d / len, len - 0.5f) < len - 0.5f;
+        }
+    }
+
     private bool PickableFromPlayerFloor(ActorRenderState s)
     {
         var p = s.CurrentTransform.Translation;
@@ -31392,12 +31413,12 @@ void main()
         ActorRenderState? bestEnemy = null;
         StaticPropInstance? bestProp = null;
         LootPile? bestPile = null;
-        void Consider(Vector3 anchor, float radiusPx, Action commit)
+        void Consider(Vector3 anchor, float radiusPx, Action commit, Func<bool>? visible = null)
         {
             if (!Project(anchor, out var px)) return;
             float r = radiusPx * uiScale;
             float d2 = Vector2.DistanceSquared(px, cursorPx);
-            if (d2 <= r * r && d2 < bestD2) { bestD2 = d2; commit(); }
+            if (d2 <= r * r && d2 < bestD2 && (visible is null || visible())) { bestD2 = d2; commit(); }
         }
         foreach (var s in _actors)
         {
@@ -31416,14 +31437,16 @@ void main()
             if (!prop.IsBreakable || prop.IsDestroyed) continue;
             var self = prop;
             Consider(prop.World.Translation + new Vector3(0f, 0.45f, 0f), 26f,
-                () => { bestEnemy = null; bestProp = self; bestPile = null; });
+                () => { bestEnemy = null; bestProp = self; bestPile = null; },
+                () => VisibleToPick(self.World.Translation, 0.45f, 0.9f));
         }
         foreach (var pile in _lootPiles)
         {
             if (pile.Throw is not null && pile.Throw.Elapsed < pile.Throw.Duration) continue;
             var self = pile;
             Consider(pile.Position + new Vector3(0f, 0.15f, 0f), 22f,
-                () => { bestEnemy = null; bestProp = null; bestPile = self; });
+                () => { bestEnemy = null; bestProp = null; bestPile = self; },
+                () => VisibleToPick(self.Position, 0.15f, 0.4f));
         }
         return (bestEnemy, bestProp, bestPile);
     }
@@ -31925,6 +31948,8 @@ void main()
         {
             if (!prop.IsBreakable || prop.IsDestroyed) continue;
             var pos = prop.World.Translation;
+            // On the surface the click landed on, not a floor above or below it.
+            if (MathF.Abs(pos.Y - groundHit.Y) > PickSameFloorYBand) continue;
             float dx = pos.X - groundHit.X;
             float dz = pos.Z - groundHit.Z;
             float d  = MathF.Sqrt(dx * dx + dz * dz);
@@ -39748,6 +39773,7 @@ void main()
             {
                 var pile = _lootPiles[i];
                 if (pile.Throw is not null) continue;
+                if (MathF.Abs(pile.Position.Y - clickPos.Y) > PickSameFloorYBand) continue;
                 float dx = pile.Position.X - clickPos.X;
                 float dz = pile.Position.Z - clickPos.Z;
                 float d2 = dx * dx + dz * dz;
