@@ -15638,6 +15638,40 @@ void main()
         return list;
     }
 
+    /// <summary>A picker with the creator positions of a look given by name
+    /// (an imported original save: head mesh or "default", and the skin,
+    /// hair, shirt and pants textures). A name the lists lack keeps the
+    /// position given.</summary>
+    private HeroVariantPicker WithNamedLook(HeroVariantPicker pick, SiegeFX.Core.Save.HeroVariantSnapshot v)
+    {
+        if (v.HeadMesh is null && v.SkinTexture is null && v.HairTexture is null
+            && v.ShirtTexture is null && v.PantsTexture is null) return pick;
+        EnsureCreatorOptions(pick.Gender);
+        static int Find(List<string>? list, string? name, int fallback)
+        {
+            if (list is null || name is null) return fallback;
+            int i = list.FindIndex(x => x.Equals(name.Trim(), StringComparison.OrdinalIgnoreCase));
+            return i >= 0 ? i : fallback;
+        }
+        int head = pick.HeadIdx;
+        if (v.HeadMesh is { } hm && HeadMeshList(pick) is { } heads)
+            head = hm.Trim().Equals("default", StringComparison.OrdinalIgnoreCase) ? heads.Count : Find(heads, hm, head);
+        HeroVariantPicker With(int headIdx, int style) => new()
+        {
+            Gender = pick.Gender, BodyTypeIdx = pick.BodyTypeIdx, SkinSuffix = pick.SkinSuffix,
+            HairSuffix = pick.HairSuffix, PantsSuffix = pick.PantsSuffix,
+            HeadIdx = headIdx, StyleIdx = style,
+            FaceIdx  = Find(_ccSkin, v.SkinTexture, pick.FaceIdx),
+            ShirtIdx = Find(_ccShirt, v.ShirtTexture, pick.ShirtIdx),
+            PantsIdx = Find(_ccPant, v.PantsTexture, pick.PantsIdx),
+        };
+        var withHead = With(head, pick.StyleIdx);
+        var named = With(head, Find(HairListFor(withHead), v.HairTexture, pick.StyleIdx));
+        Console.WriteLine($"[cc] imported look: head={v.HeadMesh}->{named.HeadIdx} skin={v.SkinTexture}->{named.FaceIdx} " +
+                          $"hair={v.HairTexture}->{named.StyleIdx} shirt={v.ShirtTexture}->{named.ShirtIdx} pants={v.PantsTexture}->{named.PantsIdx}");
+        return named;
+    }
+
     /// <summary>The hair index on a new head: the same hair when the new
     /// head's list has it, else the first (the original's behavior).</summary>
     private int HairOnNewHead(HeroVariantPicker oldPick, HeroVariantPicker newPick)
@@ -44384,6 +44418,9 @@ void main()
                     ShirtIdx = Math.Max(0, ps.Variant.ShirtIdx),
                     PantsIdx = Math.Max(0, ps.Variant.PantsIdx),
                 };
+                // An imported save names its look instead (the original's
+                // custom_head and [skins]); place each name in the creator's lists.
+                restored = WithNamedLook(restored, ps.Variant);
                 // Re-derive the texture overrides so the next ResolveActorTexture
                 // call paints skin/pants from the saved variant, not whichever
                 // override was active at boot. The body mesh itself is whatever
