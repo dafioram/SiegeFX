@@ -356,7 +356,7 @@ internal sealed class CharacterCreatorPanel
         => n.ToString(System.Globalization.CultureInfo.InvariantCulture).PadLeft(width, '0');
 
     HeroVariantPicker With(
-        HeroGender? g = null, int? style = null, int? color = null,
+        HeroGender? g = null, int? style = null,
         int? face = null, int? shirt = null, int? pants = null, int? head = null)
         => new()
         {
@@ -369,7 +369,6 @@ internal sealed class CharacterCreatorPanel
             PantsSuffix = Picker.PantsSuffix,
             HeadIdx     = head  ?? Picker.HeadIdx,
             StyleIdx    = style ?? Picker.StyleIdx,
-            ColorIdx    = color ?? Picker.ColorIdx,
             FaceIdx     = face  ?? Picker.FaceIdx,
             ShirtIdx    = shirt ?? Picker.ShirtIdx,
             PantsIdx    = pants ?? Picker.PantsIdx,
