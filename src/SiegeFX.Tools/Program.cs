@@ -88,6 +88,7 @@ static void PrintUsage()
     Console.WriteLine("  siegefx parity ledger <install> [--engine=DIR] [--out=DIR] [--baseline=FILE] [--write-baseline=FILE]");
     Console.WriteLine("  siegefx tank info    <tank>");
     Console.WriteLine("  siegefx tank list    <tank> [--prefix=PATH] [--ext=.EXT]");
+    Console.WriteLine("  siegefx tank grep    <tank> <text> [--prefix=PATH] [--ext=.EXT] [--max=N]   (text files: lines containing text)");
     Console.WriteLine("  siegefx tank extract <tank> <resource-path> [dest-file]");
     Console.WriteLine("  siegefx tank fuzz    <tank>");
     Console.WriteLine("  siegefx raw  info    <file.raw>");
@@ -179,12 +180,13 @@ static int UnknownCommand(string cmd)
 
 static int DispatchTank(string[] a)
 {
-    if (a.Length == 0) { Console.Error.WriteLine("usage: siegefx tank <info|list|extract|fuzz> ..."); return 1; }
+    if (a.Length == 0) { Console.Error.WriteLine("usage: siegefx tank <info|list|extract|grep|fuzz> ..."); return 1; }
     return a[0].ToLowerInvariant() switch
     {
         "info"    => CmdTankInfo(a[1..]),
         "list"    => CmdTankList(a[1..]),
         "extract" => CmdTankExtract(a[1..]),
+        "grep"    => CmdTankGrep(a[1..]),
         "fuzz"    => CmdTankFuzz(a[1..]),
         _         => UnknownCommand("tank " + a[0]),
     };
@@ -5630,6 +5632,50 @@ static int CmdTankInfo(string[] a)
     Console.WriteLine($"Files        : {reader.FileCount}");
     if (reader.InvalidFileCount > 0)
         Console.WriteLine($"Invalid files: {reader.InvalidFileCount}");
+    return 0;
+}
+
+/// <summary>`tank grep` — every line of the tank's text files (.gas, .skrit,
+/// .txt and the like; files holding a NUL byte are skipped) that contains the
+/// text, case-insensitively, as path:line: text. Finds which file configures
+/// something without knowing its name.</summary>
+static int CmdTankGrep(string[] a)
+{
+    string? prefix = null, ext = null, tankPath = null, text = null;
+    int max = 400;
+    foreach (var arg in a)
+    {
+        if      (arg.StartsWith("--prefix=", StringComparison.Ordinal)) prefix = arg["--prefix=".Length..];
+        else if (arg.StartsWith("--ext=",    StringComparison.Ordinal)) ext    = arg["--ext=".Length..];
+        else if (arg.StartsWith("--max=",    StringComparison.Ordinal) && int.TryParse(arg["--max=".Length..], out var m)) max = m;
+        else if (!arg.StartsWith("--")) { if (tankPath is null) tankPath = arg; else text ??= arg; }
+        else { Console.Error.WriteLine($"unknown option: {arg}"); return 1; }
+    }
+    if (tankPath is null || string.IsNullOrEmpty(text))
+    { Console.Error.WriteLine("usage: siegefx tank grep <tank> <text> [--prefix=PATH] [--ext=.EXT] [--max=N]"); return 1; }
+    if (ext is not null && !ext.StartsWith('.')) ext = "." + ext;
+
+    using var tank = TankFile.Open(tankPath);
+    var reader = new TankReader(tank);
+    int shown = 0, total = 0, files = 0;
+    foreach (var path in reader.ListFiles().OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+    {
+        if (prefix is not null && !path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+        if (ext    is not null && !path.EndsWith  (ext,    StringComparison.OrdinalIgnoreCase)) continue;
+        byte[] bytes;
+        try { bytes = reader.ExtractToMemory(path); } catch { continue; }
+        if (Array.IndexOf(bytes, (byte)0) >= 0) continue;   // binary
+        var lines = System.Text.Encoding.Latin1.GetString(bytes).Split('\n');
+        bool hit = false;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].Contains(text, StringComparison.OrdinalIgnoreCase)) continue;
+            hit = true; total++;
+            if (shown++ < max) Console.WriteLine($"{path}:{i + 1}: {lines[i].Trim()}");
+        }
+        if (hit) files++;
+    }
+    Console.WriteLine($"{total} line(s) in {files} file(s){(total > max ? $"; first {max} shown (--max=N for more)" : "")}");
     return 0;
 }
 
