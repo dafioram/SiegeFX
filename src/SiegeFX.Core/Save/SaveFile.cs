@@ -521,6 +521,18 @@ public sealed class HeroVariantSnapshot
     public int StyleIdx { get; set; } = -1;
     public int ShirtIdx { get; set; } = -1;
     public int PantsIdx { get; set; } = -1;
+
+    // The look by name, as the original game's save writes it: an imported
+    // save carries these, and the game turns them into the creator's
+    // positions above when it loads (null = not given; SiegeFX's own saves
+    // write the positions only).
+    /// <summary>The head mesh (<c>custom_head</c>), or "default" for the
+    /// body's own head.</summary>
+    public string? HeadMesh { get; set; }
+    public string? SkinTexture { get; set; }
+    public string? HairTexture { get; set; }
+    public string? ShirtTexture { get; set; }
+    public string? PantsTexture { get; set; }
 }
 
 /// <summary>One journal entry as stored in a save. Mirrors
