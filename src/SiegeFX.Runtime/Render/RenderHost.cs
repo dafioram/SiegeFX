@@ -4980,7 +4980,9 @@ public sealed class RenderHost : IDisposable
     // 13,6,52,52 = 39×46), and how much of the head shows top to bottom
     // (crown to chin), whatever the camera's distance.
     private const float PortraitAspect = 39f / 46f;
-    private const float PortraitViewHeight = 0.24f;
+    private const float PortraitViewHeight = 0.20f;
+    private const float PortraitAmbient = 0.40f;
+    private static readonly Vector3 PortraitKey = new(0.55f, 0.50f, 0.44f);
     // character_camera.gas [portrait_camera], per hero template: where the
     // camera stands and aims in the head bone's frame (x up the head, y out
     // of the face, z across it). The defaults are the farm heroes'.
@@ -5078,7 +5080,7 @@ public sealed class RenderHost : IDisposable
         _skinShader.SetInt("uDirCount", 1);
         _skinShader.SetFloat("uAmbient", 0.52f);
         Span<Vector3> vdir = stackalloc Vector3[1];
-        vdir[0] = Vector3.Normalize(at - eye);
+        vdir[0] = Vector3.Normalize(eye - at);   // toward the light (the camera), as the world's
         Span<Vector3> vcol = stackalloc Vector3[1];
         vcol[0] = new Vector3(0.85f, 0.82f, 0.75f);
         _skinShader.SetVec3Array("uDirDir", vdir);
@@ -5303,11 +5305,15 @@ public sealed class RenderHost : IDisposable
         // Fixed studio key so the portrait reads the same in a crypt as in a
         // meadow; stamp invalidated below so the world re-uploads its own.
         _skinShader.SetInt("uDirCount", 1);
-        _skinShader.SetFloat("uAmbient", 0.52f);
+        // The key comes from the camera (uDirDir points toward the light, as
+        // the world's do; it pointed away, leaving the face on ambient alone).
+        // Levels measured against the original's portrait: its face shows at
+        // about three quarters of the skin texture's brightness, a little warm.
+        _skinShader.SetFloat("uAmbient", PortraitAmbient);
         Span<Vector3> pdir = stackalloc Vector3[1];
-        pdir[0] = Vector3.Normalize(at - eye);
+        pdir[0] = Vector3.Normalize(eye - at);
         Span<Vector3> pcol = stackalloc Vector3[1];
-        pcol[0] = new Vector3(0.85f, 0.82f, 0.75f);
+        pcol[0] = PortraitKey;
         _skinShader.SetVec3Array("uDirDir", pdir);
         _skinShader.SetVec3Array("uDirColor", pcol);
         _skinShader.SetInt("uPointCount", 0);
