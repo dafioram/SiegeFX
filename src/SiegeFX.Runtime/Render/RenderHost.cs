@@ -4980,7 +4980,7 @@ public sealed class RenderHost : IDisposable
     // 13,6,52,52 = 39×46), and how much of the head shows top to bottom
     // (crown to chin), whatever the camera's distance.
     private const float PortraitAspect = 39f / 46f;
-    private const float PortraitViewHeight = 0.20f;
+    private const float PortraitViewHeight = 0.24f;
     private const float PortraitAmbient = 0.40f;
     private static readonly Vector3 PortraitKey = new(0.55f, 0.50f, 0.44f);
     // character_camera.gas [portrait_camera], per hero template: where the
