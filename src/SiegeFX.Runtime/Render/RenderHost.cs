@@ -1672,14 +1672,19 @@ public sealed class RenderHost : IDisposable
     // spawned player is kept so the created look carries into the game.
     private HeroVariantPicker? _playerPicker;
     private HeroGender? _ccOptGender;
+    private int _perfFrames;
+    private double _perfSeconds, _perfWorst;
     private List<string> _ccHair  = new();
     private List<string> _ccSkin  = new();
     private List<string> _ccShirt = new();
     private List<string> _ccPant  = new();
+    // Each gender's options, listed once. Co-op draws a boy and a girl in the
+    // same frame: one shared slot re-listed the tanks and dropped every
+    // composite (without freeing its GPU texture) twice a frame.
+    private readonly Dictionary<HeroGender, (List<string> Hair, List<string> Skin, List<string> Shirt, List<string> Pant)> _ccOptionsByGender = new();
+    // Keys name the gender's own files (skin_*/hair_* of fb or fg, clothing
+    // base 008 or 009), so both genders' composites live here side by side.
     private readonly Dictionary<string, GlTexture?> _ccCompCache = new();
-    // Each gender's option lists, kept once built: remote players of the other
-    // gender look theirs up every frame.
-    private readonly Dictionary<HeroGender, (List<string> Hair, List<string> Skin, List<string> Shirt, List<string> Pant)> _ccOptions = new();
     private sealed class EquippedLayer
     {
         public required SiegeFX.Core.Assets.AspMesh Asp { get; init; }
@@ -2046,6 +2051,10 @@ public sealed class RenderHost : IDisposable
         // nulled, the anim accumulator stops advancing, and the last skin matrices
         // effectively freeze the body mid-pose. Phase 12d will swap to chore_die.
         public bool IsDead;
+        /// <summary>A multiplayer player who chose "Respawn as Ghost": walks,
+        /// but cannot fight, take things or be targeted, and draws pale and
+        /// see-through until a shrine (or a minute) brings it back to life.</summary>
+        public bool IsGhost;
 
         // SC-MOB-PARTIES — the runtime monster pack this actor belongs to
         // (authored [mind] party_template); null = solo.
@@ -5642,6 +5651,16 @@ public sealed class RenderHost : IDisposable
         _ => null,
     };
     private bool _devScreenMenuOpened;
+    // Test hook: SIEGEFX_DEV_DIE_AFTER=<seconds> kills the hero that long into
+    // a region, through the normal death path (scratch recipes, never players).
+    private readonly double _devDieAfter =
+        double.TryParse(Environment.GetEnvironmentVariable("SIEGEFX_DEV_DIE_AFTER"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var dda) ? dda : -1;
+    private bool _devDied;
+    // Test hook: SIEGEFX_DEV_EQUIP=<weapon template>[,<shield template>] puts
+    // gear in the hero's hands at start (scratch recipes, never players).
+    private readonly string? _devEquip = Environment.GetEnvironmentVariable("SIEGEFX_DEV_EQUIP");
+    private bool _devEquipped;
     private bool _camTracking = true;
     private bool _altComboFired;
     // SC-FREE-LOOK — authored camera_free_look hold state (default D).
@@ -5923,6 +5942,15 @@ public sealed class RenderHost : IDisposable
     /// menu" relaunches the frontend (splash → main menu) and closes this
     /// window — the inverse of the LaunchRegion* relaunches. If the relaunch
     /// can't start, fall back to a plain close so Exit always exits.</summary>
+    /// <summary>A relaunch that is not into a multiplayer game must not carry
+    /// one's role along: the inherited SIEGEFX_MP_* would make the next
+    /// single-player region dial the old host.</summary>
+    private static void DropMultiplayerEnv(IDictionary<string, string?> env)
+    {
+        foreach (var k in new[] { "SIEGEFX_MP_ROLE", "SIEGEFX_MP_PROVIDER", "SIEGEFX_MP_HOST", "SIEGEFX_MP_PORT", "SIEGEFX_MP_NAME" })
+            env.Remove(k);
+    }
+
     private void ExitToMainMenu()
     {
         try
@@ -5941,6 +5969,7 @@ public sealed class RenderHost : IDisposable
                         psi.ArgumentList.Add(asmPath);
                     else ok = false;
                 }
+                DropMultiplayerEnv(psi.Environment);
                 if (ok) System.Diagnostics.Process.Start(psi);
             }
         }
@@ -6546,6 +6575,11 @@ public sealed class RenderHost : IDisposable
     // vars (set by LaunchRegionViaRelaunch), and re-establishes the session in
     // the region rather than trying to carry a socket across the relaunch.
     private readonly string? _mpInRegionRole = Environment.GetEnvironmentVariable("SIEGEFX_MP_ROLE");
+    /// <summary>This process plays a multiplayer game (host or client). The
+    /// world is the session's, not a single-player save: no saving or loading
+    /// (menu, quick keys, checkpoint autosaves).</summary>
+    private bool InMultiplayerGame => _mpInRegionRole is not null;
+    private const string MpNoSaveMessage = "Saving and loading are not available in a multiplayer game.";
     private bool _mpInRegionDone;
     // Co-op runs the session on the frame loop, and a vsynced swap blocks while
     // the compositor shows nothing of the window (covered, minimized, another
@@ -6646,10 +6680,14 @@ public sealed class RenderHost : IDisposable
     // host re-hosts on its game port (retrying past the frontend socket-release
     // race); the client reconnects to the same host address it joined in staging
     // (raising the connect budget because the host is loading a region too).
-    private void MpInRegionInit()
+    // Seconds this region process has waited for its Epic sign-in.
+    private double _mpInRegionWaited;
+
+    /// <returns>True once the session is up, or will not be (nothing to retry).</returns>
+    private bool MpInRegionInit()
     {
         var role = _mpInRegionRole;
-        if (role is null) return;
+        if (role is null) return true;
         string provider = Environment.GetEnvironmentVariable("SIEGEFX_MP_PROVIDER") ?? "lan";
         string host = Environment.GetEnvironmentVariable("SIEGEFX_MP_HOST") ?? "";
         int port = int.TryParse(Environment.GetEnvironmentVariable("SIEGEFX_MP_PORT"), out var pv)
@@ -6657,9 +6695,33 @@ public sealed class RenderHost : IDisposable
         string name = Environment.GetEnvironmentVariable("SIEGEFX_MP_NAME") is { Length: > 0 } n
             ? n : (_heroName.Length > 0 ? _heroName : "Player");
         bool asHost = string.Equals(role, "host", StringComparison.OrdinalIgnoreCase);
-        SiegeFX.Core.Net.NetLog.Info($"in-region MP init: role={role} provider={provider} host='{host}' port={port} name='{name}' region={_regionPath}");
 
         MpInitProvider(name); // reflection-load EOS if present (idempotent, fresh process)
+        bool eos = string.Equals(provider, "eos", StringComparison.OrdinalIgnoreCase);
+        if (eos)
+        {
+            // A fresh process: its Epic sign-in started a moment ago. An
+            // internet game must not fall back to LAN (nobody reaches a LAN
+            // host over the internet), so wait for it, ticking EOS here
+            // (TickMpInRegion runs only once the session exists).
+            var state = MpInternet();
+            if (state == MpInternetState.SigningIn && _mpInRegionWaited < 30)
+            {
+                if (_mpInRegionWaited == 0) { SiegeFX.Core.Net.NetLog.Info("in-region: waiting for the Epic sign-in"); MpToast("Signing in to Epic..."); }
+                _eosTick?.Invoke();
+                _mpInRegionWaited += _frameDtSeconds;
+                return false;
+            }
+            if (state != MpInternetState.Ready)
+            {
+                SiegeFX.Core.Net.NetLog.Error(state == MpInternetState.SigningIn
+                    ? "in-region: the Epic sign-in did not finish in 30 s; no internet co-op in this session"
+                    : $"in-region: no internet co-op in this session (Epic: {state})");
+                MpToast("Could not sign in to Epic: internet co-op is unavailable");
+                return true;
+            }
+        }
+        SiegeFX.Core.Net.NetLog.Info($"in-region MP init: role={role} provider={provider} host='{host}' port={port} name='{name}' region={_regionPath}");
 
         var (lobby, rawTransport) = SiegeFX.Core.Net.MpProviderFactory.Create(provider);
         // Tune the connect budget on the raw UDP transport BEFORE the AEAD wrap
@@ -6677,7 +6739,11 @@ public sealed class RenderHost : IDisposable
         if (_triggerRuntime is not null) _triggerRuntime.IsMultiplayerSession = true;
         session.BuildLocalPlayerState = BuildLocalMpPlayerState;
         session.ApplyPlayerStates = MpApplyPlayerStates;   // P2 — remote avatars
-        session.OnPlayerLeft = id => { MpRemoveRemoteAvatar(id); _mpPlayerInfos.Remove(id); MpToast($"Player {id} left the game"); };
+        session.OnPlayerLeft = id =>
+        {
+            string who = _mpPlayerNames.TryGetValue(id, out var left) ? left : $"Player {id}";
+            MpRemoveRemoteAvatar(id); _mpPlayerInfos.Remove(id); MpToast($"{who} left the game");
+        };
         session.OnPlayerJoined = (id, nm) =>
         {
             _mpPlayerNames[id] = nm;
@@ -6703,6 +6769,13 @@ public sealed class RenderHost : IDisposable
         };
         // SC-MP-PLAYERS — character cards + in-game chat overlay.
         session.OnPlayerInfo = MpApplyPlayerInfo;
+        // Everyone's name, from the host's roster (the joiner otherwise never
+        // learns the host's: chat and notices read "Player 0").
+        session.OnRoster = roster =>
+        {
+            foreach (var e in roster)
+                if (e.Player != session.LocalPlayerId && e.Name.Length > 0) _mpPlayerNames[e.Player] = e.Name;
+        };
         session.OnChatFrom += MpOnChatLine;
         _mpPlayerNames[asHost ? 0 : -1] = name;
         // SC-MP-LOOT / GIVE / RECRUIT — host-authoritative piles, item
@@ -6730,7 +6803,7 @@ public sealed class RenderHost : IDisposable
         if (!asHost) session.ApplyDelta = MpApplyWorldDelta; // P3 — host-owned enemies
         if (!asHost) session.OnJoinAccepted = id =>
         {
-            MpRemoveRemoteAvatar(id); // never draw ourselves as a remote player
+            MpRemoveRemoteAvatar(id, "it is this machine's own player"); // never draw ourselves as a remote player
             _mpPlayerNames[id] = name;
             _mpLastSentInfo = null;   // (re)announce our card to the host
             MpToast("Joined — playing with the host");
@@ -6743,14 +6816,29 @@ public sealed class RenderHost : IDisposable
             // and the whole save it would carry outgrows a UDP datagram.
             session.EnumerateActors = MpEnumerateWorldActors;
             session.ApplyClientHit = MpApplyClientHit; // F3 — client hits resolve here
+            // Join in progress, always: a player who joins from the menus is
+            // sent straight into this region (and placed beside the host).
+            session.InProgress = (_regionPath ?? MpRegionPath, (int)_difficulty);
+            // The co-op leash: a player this camera cannot see is too far.
+            session.IsPlayerOutOfView = MpRemoteOutOfView;
             transport.PeerConnected += id => SiegeFX.Core.Net.NetLog.Info($"in-region: peer {id} joined ({transport.Peers.Count} in world)");
             transport.PeerDisconnected += id => SiegeFX.Core.Net.NetLog.Info($"in-region: peer {id} left");
+            if (eos)
+            {
+                // EOS listens at once (no port to bind) and, like every EOS
+                // call, on this thread, the one that ticks it.
+                transport.ListenAsync(port, default).GetAwaiter().GetResult();
+                SiegeFX.Core.Net.NetLog.Info("in-region host listening on Epic P2P");
+                MpToast("Hosting: waiting for players to join");
+                MpListGameInProgress(lobby, name, port);
+                return true;
+            }
             _ = Task.Run(async () =>
             {
                 for (int i = 0; i < 20; i++)
                 {
                     if (await transport.ListenAsync(port, default).ConfigureAwait(false))
-                    { SiegeFX.Core.Net.NetLog.Info($"in-region host listening on :{port}"); MpToast("Hosting — waiting for players to join"); return; }
+                    { SiegeFX.Core.Net.NetLog.Info($"in-region host listening on :{port}"); MpToast("Hosting — waiting for players to join"); MpListGameInProgress(lobby, name, port); return; }
                     SiegeFX.Core.Net.NetLog.Warn($"in-region host bind :{port} busy (attempt {i + 1}/20) — frontend socket not released yet?");
                     await Task.Delay(500).ConfigureAwait(false);
                 }
@@ -6761,16 +6849,152 @@ public sealed class RenderHost : IDisposable
         else
         {
             MpMarkClientWorldActors(); // host drives the mobs; suppress local AI
-            transport.PeerDisconnected += _ => { SiegeFX.Core.Net.NetLog.Warn("in-region: lost connection to host"); MpToast("Lost connection to the host"); };
+            transport.PeerDisconnected += _ =>
+            {
+                if (!session.Joined) return;   // still joining: the JoinRequest keeps trying
+                SiegeFX.Core.Net.NetLog.Warn("in-region: lost connection to host"); MpToast("Lost connection to the host");
+            };
             if (string.IsNullOrWhiteSpace(host))
-            { SiegeFX.Core.Net.NetLog.Error("in-region client has no host address — cannot connect"); MpToast("No host address — cannot connect"); return; }
+            { SiegeFX.Core.Net.NetLog.Error("in-region client has no host address — cannot connect"); MpToast("No host address — cannot connect"); return true; }
             MpToast($"Connecting to host {host}...");
+            if (eos)
+            {
+                // Same thread as the EOS tick; the JoinRequest repeats until the
+                // host (which may still be loading) answers.
+                if (transport.ConnectAsync(host, default).GetAwaiter().GetResult())
+                { SiegeFX.Core.Net.NetLog.Info($"in-region: dialing host {host} over Epic P2P — sending JoinRequest"); session.SendJoinRequest(); }
+                else MpToast("Could not connect to the host — see session log");
+                return true;
+            }
             _ = transport.ConnectAsync(host, default).ContinueWith(t =>
             {
                 if (t.Result) { SiegeFX.Core.Net.NetLog.Info($"in-region: connected to host {host} — sending JoinRequest"); session.SendJoinRequest(); }
                 else { SiegeFX.Core.Net.NetLog.Error($"in-region: could NOT connect to host {host}. See [net] lines."); MpToast("Could not connect to the host — see session log"); }
             }, TaskScheduler.Default);
         }
+        return true;
+    }
+
+    /// <summary>The game list shows a game under way too (join in progress is
+    /// always on): the staging host's listing ended when it relaunched.</summary>
+    private void MpListGameInProgress(SiegeFX.Core.Net.ILobbyService lobby, string hostName, int port)
+    {
+        var attrs = new Dictionary<string, string>
+        {
+            ["port"] = port.ToString(),
+            ["map"] = "Kingdom of Ehb",
+            ["host"] = hostName,
+            ["state"] = "in progress",
+        };
+        _ = lobby.CreateAsync($"{hostName}'s Game", attrs, default).ContinueWith(t =>
+            SiegeFX.Core.Net.NetLog.Info(t.Status == TaskStatus.RanToCompletion && t.Result is not null
+                ? "in-region: game listed as in progress (others can join)"
+                : "in-region: could not list the game (joins by address still work)"), TaskScheduler.Default);
+    }
+
+    /// <summary>Host: true when the remote player's avatar is outside this
+    /// camera's view (the co-op leash: "if the host can't see the player, it's
+    /// too far"). The avatar's middle, projected; behind the camera counts as out.</summary>
+    private bool MpRemoteOutOfView(int playerId)
+    {
+        var a = FindRemoteAvatar(playerId);
+        if (a is null || a.IsDead || _window is null) return false;
+        // A cutscene points the camera elsewhere: no judging distance by it then.
+        if (_nisPhase != NisPhase.Off) return false;
+        var size = _window.FramebufferSize;
+        if (size.X <= 0 || size.Y <= 0) return false;
+        var vp = _camera.GetViewProjection((float)size.X / size.Y);
+        var p = a.CurrentTransform.Translation + new Vector3(0f, 1f, 0f);
+        var c = Vector4.Transform(new Vector4(p, 1f), vp);
+        if (c.W <= 1e-4f) return true;
+        float x = c.X / c.W, y = c.Y / c.W;
+        return x < -1f || x > 1f || y < -1f || y > 1f;
+    }
+
+    // The host's co-op world saves itself (manual saves are off in a
+    // multiplayer game): every few minutes and on close, into a slot of its
+    // own so the single-player autosave is never touched. A saved game hosts
+    // again later.
+    private const double MpAutoSaveInterval = 300;
+    private const string MpAutoSaveFile = "multiplayer_autosave.save";
+    private double _mpAutoSaveTimer;
+
+    private void MpHostAutoSave(string why)
+    {
+        if (_mpNetSession is not { IsHost: true } || !InMultiplayerGame || _player is null || _bootMode) return;
+        try
+        {
+            var save = CaptureSave();
+            string host = _mpPlayerNames.TryGetValue(0, out var hn) && hn.Length > 0 ? hn : "Host";
+            save.DisplayName = $"Multiplayer: {host}'s game — {DateTime.Now:MMM d, h:mm tt}";
+            var path = Path.Combine(SiegeFX.Core.Save.SaveStore.DefaultSaveDirectory(), MpAutoSaveFile);
+            SiegeFX.Core.Save.SaveStore.Save(path, save);
+            SiegeFX.Core.Net.NetLog.Info($"mp: the game saved itself ({why}) -> {path}");
+        }
+        catch (Exception ex) { SiegeFX.Core.Net.NetLog.Warn($"mp: the game could not save itself ({why}): {ex.Message}"); }
+    }
+
+    // Client: placed beside the host once, as soon as the host's pose is known.
+    private bool _mpPlacedNearHost;
+    private double _mpLeashRetarget;
+    private bool _mpLeashWarned;
+
+    /// <summary>A walkable spot about two steps from <paramref name="host"/>
+    /// (the first of eight around it on the nav mesh), else the host's own spot.</summary>
+    private Vector3 MpSpotNear(Vector3 host)
+    {
+        if (_navMesh is null) return host;
+        for (int i = 0; i < 8; i++)
+        {
+            float ang = i * MathF.PI / 4f;
+            var q = host + new Vector3(MathF.Cos(ang) * 1.8f, 0f, MathF.Sin(ang) * 1.8f);
+            if (_navMesh.TryFindTriangle(q, out var tri, includeFadeHidden: true)
+                && MathF.Abs(_navMesh.SampleYOnTriangle(tri, q) - host.Y) < 1.2f)
+                return q;
+        }
+        return host;
+    }
+
+    /// <summary>Client: joined players start beside the host, and a player the
+    /// host cannot see is walked back toward the host.</summary>
+    private void MpClientLeash()
+    {
+        if (_mpNetSession is not { IsHost: false, Joined: true } s || s.HostState is not { } hs) return;
+        if (_player is null || _playerFollower is null || _player.IsDead) return;
+        var hostPos = new Vector3(hs.X, hs.Y, hs.Z);
+        if (!_mpPlacedNearHost)
+        {
+            _mpPlacedNearHost = true;
+            var spot = MpSpotNear(hostPos);
+            TeleportPlayerTo(spot);
+            SiegeFX.Core.Net.NetLog.Info($"in-region: placed beside the host at ({spot.X:F1},{spot.Y:F1},{spot.Z:F1})");
+            return;
+        }
+        if (!s.OutOfHostView) { _mpLeashWarned = false; _mpLeashRetarget = 0; return; }
+        _mpLeashRetarget -= _frameDtSeconds;
+        if (_mpLeashRetarget > 0) return;
+        _mpLeashRetarget = 1.0;   // follow the host as it moves
+        _pendingAttackTarget = null; _pendingCastTarget = null; _pendingCastProp = null;
+        _pendingBreakProp = null; _pendingPickupPile = null;
+        _playerFollower.SetTarget(MpSpotNear(hostPos));
+        if (!_mpLeashWarned)
+        {
+            _mpLeashWarned = true;
+            AddGameMessage("Too far from the host: heading back.");
+            SiegeFX.Core.Net.NetLog.Info("in-region: out of the host's view; walking back toward the host");
+        }
+    }
+
+    /// <summary>Client: while out of the host's view, a move that takes the
+    /// player still farther from the host is refused.</summary>
+    private bool MpLeashRefuses(Vector3 target)
+    {
+        if (_mpNetSession is not { IsHost: false, Joined: true, OutOfHostView: true } s || s.HostState is not { } hs
+            || _player is null) return false;
+        var h = new Vector3(hs.X, 0f, hs.Z);
+        var p = _player.CurrentTransform.Translation; p.Y = 0f;
+        var t = target; t.Y = 0f;
+        return Vector3.Distance(t, h) > Vector3.Distance(p, h);
     }
 
     // SC-MP-INGAME — pump the in-region session each frame. EOS needs an explicit
@@ -6784,6 +7008,12 @@ public sealed class RenderHost : IDisposable
         _eosTick?.Invoke();
         MpPumpEos(_mpTransport);
         _mpNetSession?.Tick(_frameDtSeconds);
+        MpClientLeash();
+        if (_mpNetSession is { IsHost: true })
+        {
+            _mpAutoSaveTimer += _frameDtSeconds;
+            if (_mpAutoSaveTimer >= MpAutoSaveInterval) { _mpAutoSaveTimer = 0; MpHostAutoSave("every 5 minutes"); }
+        }
         MpForwardRemoteAvatarDamage();
         MpInterpolateRemoteActors((float)_frameDtSeconds);
         // SC-MP-PLAYERS — publish our character card when it changes (join,
@@ -6846,8 +7076,8 @@ public sealed class RenderHost : IDisposable
         if (avatar is null) return;
         bool wantGirl = info.Gender == 1;
         bool isGirl = avatar.Actor.Template.Name.Contains("farmgirl", StringComparison.OrdinalIgnoreCase);
-        if (wantGirl != isGirl) MpRemoveRemoteAvatar(info.Player);
-        else _netPickers[avatar.Actor] = MpPickerFromInfo(info);
+        if (wantGirl != isGirl) MpRemoveRemoteAvatar(info.Player, "rebuilt to match the player's character card");
+        else { _netPickers[avatar.Actor] = MpPickerFromInfo(info); MpApplyRemoteGear(avatar, info); }
     }
 
     /// <summary>The local player's card, from the same fields the HUD shows.</summary>
@@ -6865,7 +7095,52 @@ public sealed class RenderHost : IDisposable
             string.IsNullOrEmpty(_heroName) ? "Adventurer" : _heroName,
             _playerStartingClass,
             U(st.Strength), U(st.Dexterity), U(st.Intelligence),
-            B(st.MeleeSkill), B(st.RangedSkill), B(st.NatureMagicSkill), B(st.CombatMagicSkill));
+            B(st.MeleeSkill), B(st.RangedSkill), B(st.NatureMagicSkill), B(st.CombatMagicSkill),
+            PlayerWieldRef() is { Length: > 0 } wieldRef ? ResolveItemRef(wieldRef) : "",
+            _playerEquipment.TryGetValue("es_shield_hand", out var shieldRef) && !string.IsNullOrWhiteSpace(shieldRef)
+                ? ResolveItemRef(shieldRef) : "",
+            ComputePreferredPlayerStance(_playerEquipment) is int stance ? (byte)Math.Clamp(stance, 0, 254) : (byte)255);
+    }
+
+    // The gear last put on each remote avatar, so a card resent unchanged
+    // (or a rebuilt avatar) does not reload it needlessly.
+    private readonly Dictionary<ActorRenderState, (string Weapon, string Shield, byte Stance)> _mpAvatarGear = new();
+
+    /// <summary>Dress a remote player's stand-in in the gear its owner holds:
+    /// weapon and shield on the template's grip bones (the companion recipe),
+    /// and the owner's stance, so a replayed swing is the sword swing, not
+    /// the bare-handed one.</summary>
+    private void MpApplyRemoteGear(ActorRenderState avatar, in SiegeFX.Core.Net.MpPlayerInfo info)
+    {
+        if (_templateStore is null) return;
+        var want = (info.Weapon ?? "", info.Shield ?? "", info.Stance);
+        if (_mpAvatarGear.TryGetValue(avatar, out var had) && had == want) return;
+        _mpAvatarGear[avatar] = want;
+        avatar.WeaponMesh = null; avatar.WeaponTexture = null; avatar.WeaponBoneIdx = -1; avatar.WieldedWeaponRef = null;
+        avatar.ShieldMesh = null; avatar.ShieldTexture = null; avatar.ShieldBoneIdx = -1;
+        int FindBone(string name)
+        {
+            var bones = avatar.Actor.Mesh.BoneNames;
+            for (int i = 0; i < bones.Count; i++)
+                if (string.Equals(bones[i], name, StringComparison.OrdinalIgnoreCase)) return i;
+            return -1;
+        }
+        var weaponBone = _templateStore.GetAttribute(avatar.Actor.Template, "body", "bone_translator", "weapon_bone")?.Trim();
+        var shieldBone = _templateStore.GetAttribute(avatar.Actor.Template, "body", "bone_translator", "shield_bone")?.Trim();
+        if (want.Item1.Length > 0 && TryGetGearVisual(want.Item1, out var wVis))
+        {
+            int idx = FindBone(string.IsNullOrEmpty(weaponBone) ? "weapon_grip" : weaponBone!);
+            if (idx >= 0) { avatar.WeaponMesh = wVis.Mesh; avatar.WeaponTexture = wVis.Tex; avatar.WeaponBoneIdx = idx; avatar.WieldedWeaponRef = want.Item1; }
+        }
+        if (want.Item2.Length > 0 && TryGetGearVisual(want.Item2, out var sVis))
+        {
+            int idx = FindBone(string.IsNullOrEmpty(shieldBone) ? "shield_grip" : shieldBone!);
+            if (idx >= 0) { avatar.ShieldMesh = sVis.Mesh; avatar.ShieldTexture = sVis.Tex; avatar.ShieldBoneIdx = idx; }
+        }
+        _actorSpawner?.RefreshMotionClips(avatar.Actor, info.Stance == 255 ? null : info.Stance);
+        SiegeFX.Core.Net.NetLog.Info($"remote avatar {info.Player}: holds '{(want.Item1.Length > 0 ? want.Item1 : "nothing")}'" +
+            $"{(want.Item2.Length > 0 ? $" + '{want.Item2}'" : "")}, stance {(info.Stance == 255 ? "default" : info.Stance.ToString())}" +
+            $"{(want.Item1.Length > 0 && avatar.WeaponMesh is null ? " (weapon model not found)" : "")}");
     }
 
     private void MpOnChatLine(int player, string text)
@@ -6874,6 +7149,7 @@ public sealed class RenderHost : IDisposable
             ? n : $"Player {player}";
         _mpChatLog.Add(($"{name}: {text}", _playSeconds + 12.0));
         while (_mpChatLog.Count > 8) _mpChatLog.RemoveAt(0);
+        SiegeFX.Core.Net.NetLog.Info($"[chat] {name}: {text}");
     }
 
     // ── SC-MP-LOOT — host-authoritative loot piles ───────────────────────
@@ -8139,6 +8415,7 @@ public sealed class RenderHost : IDisposable
         ushort life = MpWireLife(p.Actor.Combat.CurrentLife);
         byte flags = 0;
         if (p.IsMoving) flags |= (byte)SiegeFX.Core.Net.MpPlayerFlags.Moving;
+        if (p.IsGhost)  flags |= (byte)SiegeFX.Core.Net.MpPlayerFlags.Ghost;
         if (p.IsDead)   flags |= (byte)SiegeFX.Core.Net.MpPlayerFlags.Dead;
         return new SiegeFX.Core.Net.MpPlayerState(0, t.X, t.Y, t.Z, yaw, life, flags, MpChoreOf(p));
     }
@@ -8207,6 +8484,10 @@ public sealed class RenderHost : IDisposable
             avatar.IsMoving = (ps.Flags & (byte)SiegeFX.Core.Net.MpPlayerFlags.Moving) != 0;
             // Death/revive of a remote player drives its avatar's corpse chore.
             MpSetNetActorDead(avatar, (ps.Flags & (byte)SiegeFX.Core.Net.MpPlayerFlags.Dead) != 0, playDeathSfx: false);
+            bool ghost = (ps.Flags & (byte)SiegeFX.Core.Net.MpPlayerFlags.Ghost) != 0;
+            if (ghost != avatar.IsGhost)
+                SiegeFX.Core.Net.NetLog.Info($"player {ps.Player} {(ghost ? "is a ghost" : "lives again")}");
+            avatar.IsGhost = ghost;
             MpReplayChore(avatar, ps.Chore);
         }
     }
@@ -8219,14 +8500,15 @@ public sealed class RenderHost : IDisposable
 
     // Cull a remote avatar when its player leaves (wired to MpSession.OnPlayerLeft,
     // which fires on both PlayerLeft messages and host-side disconnects).
-    private void MpRemoveRemoteAvatar(int playerId)
+    private void MpRemoveRemoteAvatar(int playerId, string why = "player left")
     {
         for (int i = _actors.Count - 1; i >= 0; i--)
             if (_actors[i].IsRemotePlayer && _actors[i].NetPlayerId == playerId)
             {
                 _netPickers.Remove(_actors[i].Actor);
+                _mpAvatarGear.Remove(_actors[i]);
                 _actors.RemoveAt(i);
-                SiegeFX.Core.Net.NetLog.Info($"remote avatar removed: player {playerId} left");
+                SiegeFX.Core.Net.NetLog.Info($"remote avatar removed: player {playerId} ({why})");
             }
     }
 
@@ -8282,6 +8564,7 @@ public sealed class RenderHost : IDisposable
         };
         _actors.Add(state);
         _netPickers[actor] = pick;   // composite textures per the owner's card
+        if (_mpPlayerInfos.TryGetValue(playerId, out var gearCard)) MpApplyRemoteGear(state, gearCard);
         SiegeFX.Core.Net.NetLog.Info($"remote avatar spawned: player {playerId} ({template}) at ({pos.X:F1},{pos.Y:F1},{pos.Z:F1})");
         return state;
     }
@@ -8511,21 +8794,16 @@ public sealed class RenderHost : IDisposable
         // forward); for direct providers it's the LAN endpoint. The PUID may
         // still be minting (CreateAsync is async) — FlushMpStaging refreshes it.
         _mpStaging.HostIp = asHost ? MpHostInviteAddress() : "";
-        _mpStaging.Status = asHost ? "Waiting for players to join and ready up." : "Waiting for the host to start.";
-        _mpNetSession.OnPlayerJoined = (id, name) =>
-        {
-            if (!_mpStaging.Players.Any(p => p.Name == name && !p.Host))
-                _mpStaging.Players.Add((name, false, false));
-            _mpStaging.Chat.Add($"* {name} joined.");
-        };
-        _mpNetSession.OnPlayerLeft = id =>
-        {
-            _mpStaging.Chat.Add($"* Player {id} left.");
-        };
+        _mpStaging.Status = asHost ? "Waiting for players to join and ready up." : MpJoiningStatus;
+        _mpStagingSeconds = 0;
+        // The roster (names + ready marks) is the host's; every machine shows
+        // the copy the session hands over, and the chat notes what changed.
+        _mpLastRoster = asHost ? _mpNetSession.Roster.ToList() : new();
+        _mpNetSession.OnRoster = MpApplyRoster;
         _mpNetSession.OnChat += line => _mpStaging.Chat.Add(line);
         if (!asHost)
         {
-            _mpNetSession.OnJoinAccepted = id => _mpStaging.Status = $"Joined as player {id}. Waiting for the host to start.";
+            _mpNetSession.OnJoinAccepted = _ => _mpStaging.Status = "Joined. Click READY, then wait for the host to start.";
             _mpNetSession.OnJoinRejected = reason => { _mpStaging.Status = $"Join rejected: {reason}"; };
             // Client receives the host's world snapshot; parked for the
             // in-game apply (SC-MP-INGAME) — verifying it arrives + parses.
@@ -8570,6 +8848,54 @@ public sealed class RenderHost : IDisposable
             };
         }
         _frontendScene?.SetState(Hud.FrontendScene.ScreenState.MpStaging);
+    }
+
+    private const string MpJoiningStatus = "Joining the host's game...";
+    private double _mpStagingSeconds;
+    private List<SiegeFX.Core.Net.MpRosterEntry> _mpLastRoster = new();
+
+    // The host's roster arrived (or changed on the host): note joins, leaves
+    // and ready marks in the chat, then redraw the player list from it.
+    private void MpApplyRoster(IReadOnlyList<SiegeFX.Core.Net.MpRosterEntry> roster)
+    {
+        var before = _mpLastRoster;
+        if (before.Count > 0)   // a client's first copy is the starting point, not news
+        {
+            foreach (var e in roster)
+            {
+                int i = before.FindIndex(o => o.Player == e.Player);
+                if (i < 0) _mpStaging.Chat.Add($"* {e.Name} joined.");
+                else if (before[i].Ready != e.Ready && e.Player != 0)
+                    _mpStaging.Chat.Add(e.Ready ? $"* {e.Name} is ready." : $"* {e.Name} is not ready.");
+            }
+            foreach (var o in before)
+                if (!roster.Any(e => e.Player == o.Player)) _mpStaging.Chat.Add($"* {o.Name} left.");
+        }
+        _mpLastRoster = roster.ToList();
+        MpRebuildStagingPlayers();
+        if (_mpStaging.IsHost && _mpStartCountdown <= 0)
+            _mpStaging.Status = roster.Count > 1 && roster.All(e => e.Ready)
+                ? "Everyone is ready. Click START GAME."
+                : "Waiting for players to join and ready up.";
+    }
+
+    // The staging list: the host's roster, with this player's own mark shown
+    // the moment READY is clicked (the host's copy follows within a second).
+    private void MpRebuildStagingPlayers()
+    {
+        _mpStaging.Players.Clear();
+        if (_mpLastRoster.Count == 0)
+        {
+            _mpStaging.Players.Add((_mpSession.PlayerName, _mpStaging.IsHost, _mpStaging.IsHost || _mpStaging.LocalReady));
+            return;
+        }
+        int me = _mpNetSession?.LocalPlayerId ?? 0;
+        foreach (var e in _mpLastRoster)
+        {
+            bool host = e.Player == 0;
+            bool ready = host || (!_mpStaging.IsHost && e.Player == me ? _mpStaging.LocalReady : e.Ready);
+            _mpStaging.Players.Add((e.Name, host, ready));
+        }
     }
 
     // SC-MP-EOS P4 — optional EOS platform handle (loaded by reflection so
@@ -8640,9 +8966,10 @@ public sealed class RenderHost : IDisposable
                     string userCfg = Path.Combine(SiegeFX.Core.Save.SaveStore.DefaultSaveDirectory(), "eos_config.txt");
                     string cfg = File.Exists(userCfg) ? userCfg : (MpAppFile("eos_config.txt") ?? userCfg);
                     Console.WriteLine($"[mp] EOS config: {(File.Exists(cfg) ? cfg : "(none found — LAN only)")}");
-                    // SIEGEFX_EOS_CACHE overrides the device-id cache dir so two
-                    // instances on one box get DISTINCT anonymous EOS identities
-                    // (same cache dir = same device id = same ProductUserId = collision).
+                    // SIEGEFX_EOS_CACHE moves Epic's cache folder. It does NOT
+                    // give a second copy its own identity: Epic keeps the device
+                    // id per user profile (on Linux in $XDG_DATA_HOME/.eos_sdk),
+                    // so two copies need separate XDG_DATA_HOME folders.
                     string cache = Environment.GetEnvironmentVariable("SIEGEFX_EOS_CACHE") is { Length: > 0 } cc
                         ? cc : Path.Combine(SiegeFX.Core.Save.SaveStore.DefaultSaveDirectory(), "eos_cache");
                     _eosPlatform = reg.Invoke(null, new object[] { cfg, cache, playerName });
@@ -8729,7 +9056,13 @@ public sealed class RenderHost : IDisposable
         var transport = MpSecure(rawTransport);
         _mpLobby = lobby; _mpTransport = transport;
         transport.PeerDisconnected += _ =>
-            _mpSession.Status = "Disconnected from host (timeout). See session log [net] lines.";
+        {
+            // Before the host answers, a dropped connection is retried by the
+            // JoinRequest itself; only a joined player has lost the host.
+            if (_mpNetSession is not { Joined: true }) return;
+            _mpSession.Status = "Disconnected from host. See session log [net] lines.";
+            _mpStaging.Status = "Lost the connection to the host.";
+        };
         SiegeFX.Core.Net.MpDiag.WriteSession("client", provider, transport.ProviderId,
             address, SiegeFX.Core.Net.UdpTransport.DefaultGamePort,
             SiegeFX.Core.Net.LanLobbyService.BeaconPort, MpIsEncrypted(transport));
@@ -8761,6 +9094,11 @@ public sealed class RenderHost : IDisposable
         bool active = _bootMode && st == Hud.FrontendScene.ScreenState.MpStaging;
         _mpStaging.IsActive = active;
         if (!active) return;
+        // A join the host has not answered: say so instead of looking joined.
+        _mpStagingSeconds += _frameDtSeconds;
+        if (!_mpStaging.IsHost && _mpNetSession is { Joined: false } && _mpStagingSeconds > 15
+            && _mpStaging.Status == MpJoiningStatus)
+            _mpStaging.Status = "No answer from the host yet. Still trying... (both players need the same SiegeFX version)";
         // F1 — the EOS invite PUID mints asynchronously after CreateAsync; adopt
         // it the moment it arrives so the host's shown join id stops reading as
         // the (useless-over-internet) LAN address.
@@ -8779,13 +9117,25 @@ public sealed class RenderHost : IDisposable
                 _frontendScene?.SetState(Hud.FrontendScene.ScreenState.Multiplayer);
                 break;
             case Hud.MpStagingScreen.Action.ToggleReady:
+                if (_mpStaging.IsHost) break;   // the host is always ready
                 _mpStaging.LocalReady = !_mpStaging.LocalReady;
-                _mpNetSession?.SendChat(_mpStaging.LocalReady ? "ready" : "not ready");
+                _mpNetSession?.SetReady(_mpStaging.LocalReady);
+                MpRebuildStagingPlayers();
+                if (_mpNetSession is { Joined: true })
+                    _mpStaging.Status = _mpStaging.LocalReady
+                        ? "Ready. Waiting for the host to start."
+                        : "Joined. Click READY, then wait for the host to start.";
                 break;
             case Hud.MpStagingScreen.Action.Start:
                 // Host launches the co-op game. GameStart is an unreliable
                 // packet, so start a short repeat-broadcast window before we
                 // tear down and relaunch into the region (SC-MP-INGAME).
+                // Everyone who joined has to be ready first.
+                if (_mpStartCountdown <= 0 && _mpNetSession?.NotReady is { Count: > 0 } waiting)
+                {
+                    _mpStaging.Status = $"Waiting for {string.Join(", ", waiting)} to click READY.";
+                    break;
+                }
                 if (_mpStartCountdown <= 0)
                 {
                     _mpStaging.Status = "Starting game — signaling players...";
@@ -9832,6 +10182,8 @@ uniform int       uDebugFallback;
 // a palette color per draw before issuing DrawSubset.
 uniform int       uSubsetTintActive;
 uniform vec4      uSubsetTint;
+// A multiplayer ghost (0 = solid, 1 = ghost): pale and see-through.
+uniform float     uGhost;
 // Phase 21c-1 — V-flip is now a per-pass switch. NPCs/weapons (skinned pipeline)
 // were authored with UVs that need the D3D→GL flip we used to do unconditionally.
 // Static props (barrels, jugs, fences, foliage) author UVs in the same space the
@@ -10022,7 +10374,14 @@ void main()
             lit = mix(lit, uFogColor, fogF);
         }
         lit = pow(lit, vec3(1.0 / max(uGamma, 0.1))); // ALPHA-2V options gamma
-        FragColor = vec4(lit, 1.0);
+        if (uGhost > 0.0) {
+            // A multiplayer ghost: pale, blue-white, see-through.
+            float luma = dot(lit, vec3(0.299, 0.587, 0.114));
+            lit = mix(lit, vec3(0.62, 0.80, 1.0) * (0.55 + 0.8 * luma), uGhost);
+            FragColor = vec4(lit, 1.0 - 0.55 * uGhost);
+        } else {
+            FragColor = vec4(lit, 1.0);
+        }
     }
 }";
 
@@ -10573,7 +10932,12 @@ void main()
                     // either NRE or write a corrupt save. Quit the window
                     // instead, matching DS1's "Esc on the menu = exit."
                     else if (_bootMode) _window.Close();
-                    else _pauseMenu.Toggle();
+                    // Multiplayer, dead after choosing Resume: Esc brings the
+                    // respawn choices back (Respawn as Ghost / Exit Game).
+                    else if (InMultiplayerGame && _defeatPhase == DefeatPhase.DialogClosed
+                             && !_pauseMenu.IsOpen && PartyWiped())
+                        _defeatPhase = DefeatPhase.Dialog;
+                    else { _pauseMenu.SaveLoadDisabled = InMultiplayerGame; _pauseMenu.Toggle(); }
                 }
                 // SC-KEY-AUDIT — the character pane rides its own registry
                 // action now (default P). Its old hardcoded C sat EARLIER in
@@ -11062,8 +11426,12 @@ void main()
                     _saveToastText = "Force cast: click a target";
                     _saveToastRemaining = SaveToastDuration;
                 }
-                else if (Is("quick_save")) DoQuickSave();
-                else if (Is("quick_load")) DoQuickLoad();
+                else if (Is("quick_save") || Is("quick_load"))
+                {
+                    if (InMultiplayerGame) AddGameMessage(MpNoSaveMessage);
+                    else if (Is("quick_save")) DoQuickSave();
+                    else DoQuickLoad();
+                }
                 // SC-INV-ARRANGE — the registry has always listed
                 // sort_inventory (default K); it now drives the same
                 // arrange the inventory.gas button fires.
@@ -12236,7 +12604,8 @@ void main()
                     _lmbWorldDownPos = MousePx(m);
                     _lmbDownAtMs = Environment.TickCount64;
                     _marqueeActive = false;
-                    if (!TryClickToTalk(MousePx(m)) && !DispatchAbilityClick(MousePx(m)))
+                    bool ghost = _player?.IsGhost == true;
+                    if (ghost || (!TryClickToTalk(MousePx(m)) && !DispatchAbilityClick(MousePx(m))))
                     {
                         TryClickToMove(MousePx(m));
                         // SC-HOLD-MOVE — keep steering while held.
@@ -15698,14 +16067,15 @@ void main()
 
     // SC-CD-COMPOSITE — enumerate the shipped appearance variants for a gender
     // once (skin numbering is sparse, so we list what's really in the tanks and
-    // skip blank/no-art skin slots). Re-runs only when the gender changes.
+    // skip blank/no-art skin slots), then switch between the genders' lists
+    // for free.
     private void EnsureCreatorOptions(HeroGender gender)
     {
         if (_ccOptGender == gender && _ccSkin.Count > 0) return;
         _ccOptGender = gender;
         // The composite and hair-list caches stay: their keys name the
         // gender's own textures and heads.
-        if (_ccOptions.TryGetValue(gender, out var known))
+        if (_ccOptionsByGender.TryGetValue(gender, out var known))
         {
             (_ccHair, _ccSkin, _ccShirt, _ccPant) = known;
             return;
@@ -15735,7 +16105,7 @@ void main()
         if (_ccSkin.Count == 0) _ccSkin = skins; // never leave the face with nothing
         Console.WriteLine($"[cc-options] {stem}: styles={_ccHair.Count} skins={_ccSkin.Count}/{skins.Count} " +
                           $"shirts={_ccShirt.Count} pants={_ccPant.Count}");
-        if (_ccSkin.Count > 0) _ccOptions[gender] = (_ccHair, _ccSkin, _ccShirt, _ccPant);
+        if (_ccSkin.Count > 0) _ccOptionsByGender[gender] = (_ccHair, _ccSkin, _ccShirt, _ccPant);
     }
 
     private List<string> StrippedSorted(string prefix)
@@ -18599,7 +18969,7 @@ void main()
     private bool _autoSaveRequested;
     private void TryAutoSave()
     {
-        if (_player is null) return;
+        if (_player is null || InMultiplayerGame) return;   // a co-op world is not a single-player save
         if (_playSeconds - _lastAutoSaveAt < 30) return;
         _lastAutoSaveAt = _playSeconds;
         try
@@ -22019,7 +22389,7 @@ void main()
         float bestD2 = float.MaxValue, bestDownedD2 = float.MaxValue;
         foreach (var m in _party)
         {
-            if (m is null || m.IsDead) continue;
+            if (m is null || m.IsDead || m.IsGhost) continue;
             var p = m.CurrentTransform.Translation;
             float dx = p.X - from.X, dz = p.Z - from.Z;
             float d2 = dx * dx + dz * dz;
@@ -22029,7 +22399,7 @@ void main()
             }
             else if (d2 < bestD2) { bestD2 = d2; best = m; }
         }
-        if (best is null && _player is not null && !_player.IsDead
+        if (best is null && _player is not null && !_player.IsDead && !_player.IsGhost
             && !_player.Actor.Combat.Downed)
             best = _player;
         // Co-op host: a remote player's avatar is party too; its owner takes
@@ -22037,7 +22407,7 @@ void main()
         if (_mpNetSession is { IsHost: true })
             foreach (var a in _actors)
             {
-                if (!a.IsRemotePlayer || a.IsDead) continue;
+                if (!a.IsRemotePlayer || a.IsDead || a.IsGhost) continue;
                 var p = a.CurrentTransform.Translation;
                 float dx = p.X - from.X, dz = p.Z - from.Z;
                 float d2 = dx * dx + dz * dz;
@@ -22050,7 +22420,7 @@ void main()
                 if (d2 < bd2) best = a;
             }
         if (best is null) best = bestDowned;
-        if (best is null && _player is not null && !_player.IsDead) best = _player;
+        if (best is null && _player is not null && !_player.IsDead && !_player.IsGhost) best = _player;
         return best;
     }
 
@@ -22116,7 +22486,7 @@ void main()
         float altD2 = float.MaxValue;
         void Consider(ActorRenderState? m)
         {
-            if (m is null || m.IsDead || m.Actor.Combat.Downed
+            if (m is null || m.IsDead || m.IsGhost || m.Actor.Combat.Downed
                 || ReferenceEquals(m, primary)) return;
             if (_meleeEngagedCount.TryGetValue(m, out var c2)
                 && c2 >= MeleeAttackerCountLimit) return;
@@ -22826,6 +23196,19 @@ void main()
                     if (_shrinesByScid.ContainsKey(p.Scid)) continue;
                     if (!_templateStore.TryGet(p.TemplateName, out var tpl)) continue;
                     var fountain = _templateStore.GetSection(tpl!, "fountain");
+                    // A Resurrection Shrine (respawn_statue: [respawn_shrine], placed
+                    // for multiplayer only) brings a ghost back to life.
+                    if (fountain is null && InMultiplayerGame
+                        && _templateStore.GetSection(tpl!, "respawn_shrine") is not null
+                        && _resurrectionShrineScids.Add(p.Scid))
+                    {
+                        var rw = p.Placement.LocalPosition;
+                        if (_regionLayout.TryGetTransform(p.Placement.NodeGuid, out var rnode))
+                            rw = Vector3.Transform(p.Placement.LocalPosition, rnode);
+                        _resurrectionShrines.Add(rw);
+                        Console.WriteLine($"[shrine] Resurrection Shrine {p.Scid:x8} at ({rw.X:F1},{rw.Y:F1},{rw.Z:F1})");
+                        continue;
+                    }
                     if (fountain is null) continue;
                     var world = p.Placement.LocalPosition;
                     if (_regionLayout.TryGetTransform(p.Placement.NodeGuid, out var nodeWorld))
@@ -24590,8 +24973,7 @@ void main()
         if (_mpInRegionRole is not null && !_mpInRegionDone && _player is not null
             && !_bootMode && !string.IsNullOrEmpty(_regionPath))
         {
-            _mpInRegionDone = true;
-            MpInRegionInit();
+            _mpInRegionDone = MpInRegionInit();
         }
         if (_mpNetSession is not null && !_bootMode) TickMpInRegion();
         // Phase 22-A SC-HUD-DATABAR — pause gate. Zero the dt the rest of the
@@ -24629,7 +25011,24 @@ void main()
         // SC-DEVMODE — god mode tops the hero's pools back up every tick.
         TickDevGodMode();
         // SC-DEFEAT — hero death edge + party-wipe presentation.
+        if (!string.IsNullOrWhiteSpace(_devEquip) && !_devEquipped && _player is not null && _templateStore is not null)
+        {
+            _devEquipped = true;
+            var parts = _devEquip.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length > 0) _playerEquipment["es_weapon_hand"] = parts[0];
+            if (parts.Length > 1) _playerEquipment["es_shield_hand"] = parts[1];
+            TryLoadPlayerWeapon();
+            RefreshPlayerStance();
+            Console.WriteLine($"[dev] SIEGEFX_DEV_EQUIP: hero holds {string.Join(" + ", parts)}");
+        }
+        if (_devDieAfter >= 0 && !_devDied && _player is { IsDead: false } && _playSeconds >= _devDieAfter)
+        {
+            _devDied = true;
+            Console.WriteLine($"[dev] SIEGEFX_DEV_DIE_AFTER: the hero dies ({_playSeconds:F0} s)");
+            _player.Actor.Combat.ApplyDamage(_player.Actor.Stats.MaxLife * 10f);
+        }
         TickDefeat((float)dt);
+        TickGhost((float)dt);
         // SC-CAM-SHAKE — decay the shake envelope on the frame cadence.
         TickCameraShake((float)dt);
         // SC-SPELL-EFFECTS — expire timed buff rows on the play clock.
@@ -26244,7 +26643,8 @@ void main()
                         {
                             l.Attributes.TryGetValue("map", out var map);
                             l.Attributes.TryGetValue("players", out var players);
-                            return ($"{l.Name}   {map ?? ""}   {players ?? ""}   {l.HostAddress}", l.HostAddress);
+                            bool running = l.Attributes.TryGetValue("state", out var gs) && gs == "in progress";
+                            return ($"{l.Name}{(running ? " (in progress)" : "")}   {map ?? ""}   {players ?? ""}   {l.HostAddress}", l.HostAddress);
                         }).ToList();
                     }
                     catch (Exception ex) { SiegeFX.Core.Net.NetLog.Warn($"lan scan loop: {ex.Message}"); }
@@ -26305,11 +26705,17 @@ void main()
                         try
                         {
                             if (t.Status == TaskStatus.RanToCompletion && t.Result is { } lobbies)
-                                _mpEosScanResult = lobbies.Select(l =>
+                                // One row per host: a listing whose removal Epic has
+                                // not caught up with yet loses to the game in progress.
+                                _mpEosScanResult = lobbies
+                                    .GroupBy(l => l.HostAddress)
+                                    .Select(g => g.OrderByDescending(l => l.Attributes.TryGetValue("state", out var st) && st == "in progress").First())
+                                    .Select(l =>
                                 {
                                     l.Attributes.TryGetValue("map", out var map);
                                     l.Attributes.TryGetValue("players", out var players);
-                                    return ($"{l.Name}   {map ?? ""}   {players ?? ""}", l.HostAddress);
+                                    bool running = l.Attributes.TryGetValue("state", out var gs) && gs == "in progress";
+                                    return ($"{l.Name}{(running ? " (in progress)" : "")}   {map ?? ""}   {players ?? ""}", l.HostAddress);
                                 }).ToList();
                         }
                         catch (Exception ex) { SiegeFX.Core.Net.NetLog.Warn($"eos browse loop: {ex.Message}"); }
@@ -26438,6 +26844,7 @@ void main()
                 if (!string.IsNullOrEmpty(asmPath) && System.IO.File.Exists(asmPath))
                     psi.ArgumentList.Add(asmPath);
             }
+            DropMultiplayerEnv(psi.Environment);
             System.Diagnostics.Process.Start(psi);
             Console.WriteLine("[defeat] returning to main menu (relaunch)");
             _window.Close();
@@ -26569,7 +26976,8 @@ void main()
             psi.Environment["SIEGEFX_CREATOR"] = "0";
             // SC-MP-INGAME — carry the multiplayer role/host/provider across the
             // relaunch so the region process re-establishes the session in-world.
-            if (mp is not null)
+            if (mp is null) DropMultiplayerEnv(psi.Environment);
+            else
             {
                 psi.Environment["SIEGEFX_MP_ROLE"] = mp.Role;
                 psi.Environment["SIEGEFX_MP_PROVIDER"] = mp.Provider;
@@ -26993,8 +27401,82 @@ void main()
                 _defeatReopenOnLoadClose = true;
                 ToggleHandbook();
                 break;
+            // multiplayer_respawn — notify(resume_from_respawn / respawn /
+            // show_exit_game_dialog).
+            case "resume":
+                // Stay where you fell (a friend can still bring you back);
+                // Esc offers the choices again.
+                _defeatPhase = DefeatPhase.DialogClosed;
+                AddGameMessage("You lie where you fell. Press Esc to respawn as a ghost or leave the game.");
+                break;
+            case "ghost":
+                EnterGhost();
+                break;
+            case "exit":
+                _defeatPhase = DefeatPhase.DialogClosed;
+                _pauseMenu.SaveLoadDisabled = true;
+                _pauseMenu.IsOpen = true;
+                _pauseMenu.BeginExitConfirm();
+                break;
         }
         return true;
+    }
+
+    // ====================================================================
+    // Multiplayer death: "Death is never permanent in multiplayer" (the
+    // official FAQ). A fallen player may Respawn as Ghost: the ghost walks
+    // but cannot fight, take things or be targeted, and lives again at full
+    // health after a minute, or at once at a shrine (the MP-only
+    // Resurrection Shrines, and the life / mana shrines).
+    // ====================================================================
+    private const float GhostSeconds = 60f;
+    private const float ShrineReachForGhost = 3f;
+    private float _ghostSecondsLeft;
+    // Resurrection Shrines ([respawn_shrine], placed only for multiplayer).
+    private readonly List<Vector3> _resurrectionShrines = new();
+    private readonly HashSet<uint> _resurrectionShrineScids = new();
+
+    private void EnterGhost()
+    {
+        if (_player is null) return;
+        var c = _player.Actor.Combat;
+        c.ClearDowned();
+        c.RestoreFromSave(MathF.Max(1f, _player.Actor.Stats.MaxLife), c.CurrentMana, dead: false);
+        _player.IsDead = false;
+        _player.IsGhost = true;
+        _player.Hidden = false;
+        _player.Actor.Host.OverrideAnimIndex(-1, 0f);
+        _ghostSecondsLeft = GhostSeconds;
+        _defeatPhase = DefeatPhase.None;
+        _pendingAttackTarget = null; _pendingCastTarget = null; _pendingCastProp = null;
+        _pendingBreakProp = null; _pendingPickupPile = null;
+        AddGameMessage("You are a ghost. Walk to a shrine, or wait a minute, to live again.");
+        SiegeFX.Core.Net.NetLog.Info("mp: respawned as a ghost");
+    }
+
+    private void TickGhost(float dt)
+    {
+        if (_player is not { IsGhost: true }) return;
+        _ghostSecondsLeft -= dt;
+        if (_ghostSecondsLeft <= 0f) { LiveAgain("a minute as a ghost"); return; }
+        var p = _player.CurrentTransform.Translation;
+        bool Near(Vector3 q) => (q.X - p.X) * (q.X - p.X) + (q.Z - p.Z) * (q.Z - p.Z) <= ShrineReachForGhost * ShrineReachForGhost
+                                && MathF.Abs(q.Y - p.Y) < 4f;
+        foreach (var q in _resurrectionShrines)
+            if (Near(q)) { LiveAgain("a Resurrection Shrine"); return; }
+        foreach (var sh in _shrinesByScid.Values)
+            if (Near(sh.Position)) { LiveAgain("a shrine"); return; }
+    }
+
+    private void LiveAgain(string how)
+    {
+        if (_player is null) return;
+        _player.IsGhost = false;
+        var c = _player.Actor.Combat;
+        c.RestoreFromSave(_player.Actor.Stats.MaxLife, c.CurrentMana, dead: false);
+        _player.Actor.Host.OverrideAnimIndex(-1, 0f);
+        AddGameMessage("You live again.");
+        SiegeFX.Core.Net.NetLog.Info($"mp: alive again ({how})");
     }
 
     /// <summary>SC-DEFEAT — the authored presentation. 640×480 gas rects
@@ -27035,6 +27517,20 @@ void main()
         if (!DefeatDialogActive) return;
 
         int fs = Math.Max(1, (int)MathF.Round(s));
+        if (InMultiplayerGame)
+        {
+            // multiplayer_respawn.gas — dialog_multi_respawn (204,181,427,303)
+            // with three button_4 rows: Resume, Respawn as Ghost, Exit Game.
+            var box = R(204, 181, 427, 303);
+            if (_iconRenderer is not null)
+                Hud.NinePatch.DrawCpbox(_iconRenderer, GetCommonTexture, vw, vh, box.x, box.y, box.w, box.h, Vector4.One);
+            else
+                _barRenderer.DrawRect(vw, vh, box.x, box.y, box.w, box.h, new Vector4(0.05f, 0.05f, 0.05f, 0.92f));
+            DefeatButton("resume", "Resume",           245, 212, 385, 228);
+            DefeatButton("ghost",  "Respawn as Ghost", 245, 233, 385, 249);
+            DefeatButton("exit",   "Exit Game",        245, 254, 385, 270);
+            return;
+        }
         // dialog_main_bg + dialog_text_bg — both cpbox.
         var main = R(130, 170, 510, 310);
         var inner = R(150, 190, 490, 258);
@@ -30503,6 +30999,24 @@ void main()
         // SC-DOWNED — an unconscious hero can't walk; orders still reach
         // the conscious selected members.
         bool heroSelected = _selectedPartyIdx.Contains(0) && !_player.Actor.Combat.Downed;
+        // Co-op leash: out of the host's view, no move farther from the host.
+        if (MpLeashRefuses(hit))
+        {
+            _audio?.Play(SfxOrderCantMove);
+            AddGameMessage("Too far from the host.");
+            return;
+        }
+        // A ghost only walks: no doors, levers, chests or pickups.
+        if (_player.IsGhost)
+        {
+            EndPlayerAttackLoop();
+            _playerFollower.SetTarget(hit);
+            _pendingAttackTarget = null; _pendingCastTarget = null; _pendingCastProp = null;
+            _pendingBreakProp = null; _pendingPickupPile = null;
+            _moveMarkerPos = hit; _moveMarkerAge = 0f;
+            _audio?.Play(_playerFollower.PathBlocked ? SfxOrderCantMove : SfxOrderMove);
+            return;
+        }
         // SC-NAV-PARTIAL-PATH — the whole-mesh fallback is for PLAYER orders
         // only (opt-in; ambient wanderers keep cheap fail-and-reroll).
         _playerFollower.PartialPathFallback = true;
@@ -31599,6 +32113,7 @@ void main()
     /// actionable sat under the cursor.</summary>
     private bool DispatchAbilityClick(Vector2 pos)
     {
+        if (_player?.IsGhost == true) return false;   // a ghost cannot fight
         // SC-CLICK-AUDIO — a click that lands an attack order on an enemy
         // or breakable plays DS1's order chime; a spell click plays the
         // cast-order cue.
@@ -40094,6 +40609,17 @@ void main()
         // (stamped to the millisecond) say what was loading.
         if (dt > 0.1 && _player is not null)
             Console.WriteLine($"[perf] slow frame {dt * 1000.0:F0}ms");
+        // In a co-op game, the frame rate every 10 s: "laggy" in a report is
+        // then either frames (here) or the network (the [net] lines).
+        if (_mpNetSession is not null && _player is not null)
+        {
+            _perfFrames++; _perfSeconds += dt; if (dt > _perfWorst) _perfWorst = dt;
+            if (_perfSeconds >= 10)
+            {
+                Console.WriteLine($"[perf] {_perfFrames / _perfSeconds:F0} fps over {_perfSeconds:F0} s (worst frame {_perfWorst * 1000:F0} ms)");
+                _perfFrames = 0; _perfSeconds = 0; _perfWorst = 0;
+            }
+        }
 
         // SC-TERRAIN-WHITE-GRID (audit fold — finding #3) — dev
         // fly-cam reference grid. Previously gated on
@@ -40310,6 +40836,16 @@ void main()
                 // monsters) issue one bind + one DrawSubset, identical in cost to the
                 // old single Draw() path.
                 var subsets = s.Actor.Mesh.Subsets;
+                bool ghostDraw = s.IsGhost;
+                bool blendWasOn = false;
+                if (ghostDraw)
+                {
+                    blendWasOn = _gl!.IsEnabled(EnableCap.Blend);
+                    _gl.Enable(EnableCap.Blend);
+                    _gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+                    _gl.DepthMask(false);
+                    _skinShader.SetFloat("uGhost", 1f);
+                }
                 // The hero's own head gives way to the creator's head mesh
                 // (a layer, drawn below). The GL mesh is shared: reset after.
                 // (The layer pass skips a dead hero, so a dead one keeps his.)
@@ -40351,6 +40887,12 @@ void main()
                 }
                 s.GlMesh.HideMarked = false;
                 if (remoteHead is { } rh) DrawRemoteHead(s, rh, drawClip, drawT);
+                if (ghostDraw)
+                {
+                    _skinShader.SetFloat("uGhost", 0f);
+                    _gl!.DepthMask(true);
+                    if (!blendWasOn) _gl.Disable(EnableCap.Blend);
+                }
             }
             // SC-ACTOR-TSD — never let a lava-spirit layer-2 binding leak into the
             // equipment/weapon passes below (they bind Texture0 only and would
@@ -40661,6 +41203,7 @@ void main()
             {
                 if (s.IsPlayer || s.Hidden) continue;
                 if (s.WeaponMesh is null && s.ShieldMesh is null) continue;
+                if (s.IsGhost) continue;   // a ghost holds nothing
                 // SC-REGION-LAYER-HIDE-ACTORS (follow-up) — no region stamp on
                 // actors yet; gear hides with the faded-snode gate below.
                 if (IsPosInFadedSnode(s.CurrentTransform.Translation)) continue;
@@ -43154,6 +43697,15 @@ void main()
         if (_glDisposed) return;
         _glDisposed = true;
 
+        // A multiplayer game: the host's world saves itself, then everyone
+        // leaves cleanly (the listing goes, the others see this player go).
+        MpHostAutoSave("on close");
+        if (_mpNetSession is not null || _mpLobby is not null || _mpTransport is not null)
+        {
+            try { MpTearDownSession(); }
+            catch (Exception ex) { Console.WriteLine($"[mp] leaving on close: {ex.Message}"); }
+        }
+
         // SC-RECORD — closing the window mid-recording: signal the stop so
         // the encoder finalizes a playable file (the transcode thread
         // outlives the GL teardown; WGC feeds it nothing further).
@@ -43497,6 +44049,8 @@ void main()
 
         foreach (var s in _actors)
         {
+            // Another player's avatar is that player's, not this world's.
+            if (s.IsRemotePlayer) continue;
             // CurrentTransform tracks the live position (brain / follower
             // updates it each tick); WorldTransform is the spawn pose and
             // would mis-restore an actor that wandered.

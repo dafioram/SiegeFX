@@ -24,9 +24,15 @@ public sealed class MpSession : IDisposable
     /// SCID (scid, damage). The host runs the resulting death/loot locally; its
     /// life delta syncs the new life (and any kill) back to every client.</summary>
     public Action<uint, float>? ApplyClientHit;
-    /// <summary>Host: a player joined (id, name) — for the staging roster.</summary>
+    /// <summary>Host: a player joined (id, name).</summary>
     public Action<int, string>? OnPlayerJoined;
+    /// <summary>A player who had joined left (id). Connections that close before
+    /// their JoinRequest is answered were never players and do not fire it.</summary>
     public Action<int>? OnPlayerLeft;
+    /// <summary>Both roles: everyone in the game changed: a join, a leave or a
+    /// ready mark. The host keeps the roster (host first, always ready) and sends
+    /// it to every client, so all machines show the same names and marks.</summary>
+    public Action<IReadOnlyList<MpRosterEntry>>? OnRoster;
 
     // Client callbacks
     /// <summary>Client: consume the host's world snapshot on join.</summary>
@@ -47,6 +53,13 @@ public sealed class MpSession : IDisposable
     /// <summary>Client: host pressed START — leave staging, relaunch into the
     /// region and reconnect. (regionPath, difficulty).</summary>
     public Action<string, int>? OnGameStart;
+    /// <summary>Host: is this remote player outside the host's view? Marks the
+    /// player in the pose frames (the co-op leash).</summary>
+    public Func<int, bool>? IsPlayerOutOfView;
+    /// <summary>Client: the host cannot see this player (from the last pose frame).</summary>
+    public bool OutOfHostView { get; private set; }
+    /// <summary>Client: the host's pose from the last pose frame (null until one arrives).</summary>
+    public MpPlayerState? HostState { get; private set; }
 
     public event Action<string>? OnChat;
     /// <summary>Structured chat (player id, text) — the in-game overlay
@@ -110,23 +123,83 @@ public sealed class MpSession : IDisposable
     /// out: the player id still arrives.</summary>
     public const int MaxSnapshotBytes = 32 * 1024;
     readonly Dictionary<int, MpPlayerState> _players = new(); // host: player id -> latest pose
+    // The staging roster: the host's own (the truth), or a client's latest copy.
+    readonly SortedDictionary<int, MpRosterEntry> _roster = new();
+    double _rosterTimer;                     // host: re-sent now and then (a LAN frame can drop)
+    const double RosterInterval = 2.0;
+    bool _wantReady;                         // client: the mark this player last chose
+    double _readyRetryTimer;                 // client: re-sent until the host's roster shows it
 
     public MpSession(ISessionTransport transport, bool isHost, string localName)
     {
         _t = transport; IsHost = isHost; _localName = localName ?? "Player";
         _t.PeerDisconnected += OnPeerGone;
+        if (IsHost) _roster[0] = new MpRosterEntry(0, _localName, true);
+    }
+
+    /// <summary>Everyone in the game as this machine knows it, host first.</summary>
+    public IReadOnlyList<MpRosterEntry> Roster => _roster.Values.ToList();
+
+    /// <summary>Client: the host answered the JoinRequest. The host is always joined.</summary>
+    public bool Joined => IsHost || _joined;
+
+    /// <summary>Host: the names of the players who are not ready yet.</summary>
+    public IReadOnlyList<string> NotReady =>
+        _roster.Values.Where(e => !e.Ready).Select(e => e.Name).ToList();
+
+    /// <summary>Client: mark this player ready (or not) in the staging area. The
+    /// mark is re-sent until the host's roster shows it, so a dropped frame
+    /// cannot leave the host showing the old one. The host is always ready.</summary>
+    public void SetReady(bool ready)
+    {
+        if (IsHost) return;
+        _wantReady = ready;
+        _readyRetryTimer = 0;
+        if (_joined) SendReady();
+    }
+
+    void SendReady() =>
+        _t.Send(0, new MpWriter().U8((byte)MpMsg.Ready).U8(_wantReady ? (byte)1 : (byte)0).Span);
+
+    byte[] BuildRosterFrame()
+    {
+        var w = new MpWriter(4 + _roster.Count * 20);
+        int n = Math.Min(_roster.Count, byte.MaxValue);
+        w.U8((byte)MpMsg.Roster).U8((byte)n);
+        foreach (var e in _roster.Values.Take(n))
+            w.U8((byte)e.Player).U8(e.Ready ? (byte)1 : (byte)0).Str(e.Name);
+        return w.ToArray();
+    }
+
+    // Host: the roster changed; show it here and send it to everyone.
+    void RosterChanged()
+    {
+        _rosterTimer = 0;
+        OnRoster?.Invoke(Roster);
+        Broadcast(BuildRosterFrame());
     }
 
     void OnPeerGone(int peer)
     {
         if (IsHost)
         {
-            if (_joinAccepts.Remove(peer)) _playerCount = Math.Max(1, _playerCount - 1);
             _players.Remove(peer);
+            if (!_joinAccepts.Remove(peer))
+            {
+                // A connection that closed before its JoinRequest was answered
+                // (or before one arrived) was never a player.
+                NetLog.Info($"session: connection {peer} closed before it joined");
+                return;
+            }
+            _playerCount = Math.Max(1, _playerCount - 1);
+            _roster.Remove(peer, out var gone);
             OnPlayerLeft?.Invoke(peer);
             Broadcast(new MpWriter().U8((byte)MpMsg.PlayerLeft).U8((byte)peer).ToArray());
-            NetLog.Info($"session: player {peer} left ({_playerCount}/{MaxPlayers})");
+            NetLog.Info($"session: player {peer} '{gone.Name}' left ({_playerCount}/{MaxPlayers})");
+            RosterChanged();
         }
+        else if (_joinPending)
+            NetLog.Info("session: the connection closed before the host answered; the JoinRequest keeps going");
     }
 
     /// <summary>Client entry: request to join once the transport connected.</summary>
@@ -311,6 +384,31 @@ public sealed class MpSession : IDisposable
             }
         }
 
+        if (!IsHost && _joined)
+        {
+            bool shown = _roster.TryGetValue(LocalPlayerId, out var me) && me.Ready;
+            if (shown != _wantReady)
+            {
+                _readyRetryTimer += dt;
+                if (_readyRetryTimer >= JoinRetryInterval) { _readyRetryTimer = 0; SendReady(); }
+            }
+        }
+
+        if (IsHost && _t.Peers.Count > 0)
+        {
+            _rosterTimer += dt;
+            if (_rosterTimer >= RosterInterval)
+            {
+                _rosterTimer = 0;
+                Broadcast(BuildRosterFrame());
+                foreach (var peer in _startRepeats.Keys.ToList())
+                {
+                    if (!_t.Peers.Contains(peer) || --_startRepeats[peer] < 0) { _startRepeats.Remove(peer); continue; }
+                    SendInProgressStart(peer);
+                }
+            }
+        }
+
         if (IsHost)
         {
             _deltaTimer += dt;
@@ -367,7 +465,10 @@ public sealed class MpSession : IDisposable
         foreach (var s in _players.Values)
         {
             if (n++ >= byte.MaxValue) break;
-            w.U8(s.Player).F32(s.X).F32(s.Y).F32(s.Z).F32(s.Yaw).U16(s.Life).U8(s.Flags)
+            byte flags = (byte)(s.Flags & ~(byte)MpPlayerFlags.OutOfHostView);
+            if (s.Player != LocalPlayerId && IsPlayerOutOfView?.Invoke(s.Player) == true)
+                flags |= (byte)MpPlayerFlags.OutOfHostView;
+            w.U8(s.Player).F32(s.X).F32(s.Y).F32(s.Z).F32(s.Yaw).U16(s.Life).U8(flags)
              .U8(s.Chore.Seq).U8(s.Chore.Clip).U8(s.Chore.Duration);
         }
         return w.ToArray();
@@ -392,8 +493,26 @@ public sealed class MpSession : IDisposable
     public void SendGameStart(string regionPath, int difficulty)
     {
         if (!IsHost) return;
-        Broadcast(new MpWriter().U8((byte)MpMsg.GameStart).Str(regionPath).U8((byte)difficulty).ToArray());
+        Broadcast(BuildGameStart(regionPath, difficulty));
         NetLog.Info($"session: host broadcast GameStart region='{regionPath}' diff={difficulty} to {_t.Peers.Count} peer(s)");
+    }
+
+    static byte[] BuildGameStart(string regionPath, int difficulty) =>
+        new MpWriter().U8((byte)MpMsg.GameStart).Str(regionPath).U8((byte)difficulty).ToArray();
+
+    /// <summary>Host: the game is under way (the host's region and difficulty).
+    /// A player who joins from the menus then gets a GameStart right after
+    /// the JoinAccept and goes straight into the game (join in progress);
+    /// players already in the region ignore it. Null in the staging area.</summary>
+    public (string Region, int Difficulty)? InProgress { get; set; }
+    // Host: GameStart repeats still owed to a peer that just joined (a LAN
+    // frame can drop; Epic's are reliable, the repeats are harmless there).
+    readonly Dictionary<int, int> _startRepeats = new();
+
+    void SendInProgressStart(int peer)
+    {
+        if (InProgress is not { } ip) return;
+        _t.Send(peer, BuildGameStart(ip.Region, ip.Difficulty));
     }
 
     void Broadcast(byte[] frame)
@@ -425,6 +544,7 @@ public sealed class MpSession : IDisposable
                 if (_joinAccepts.TryGetValue(peer, out var accepted))
                 {
                     _t.Send(peer, accepted);
+                    SendInProgressStart(peer);
                     NetLog.Info($"session: player {peer} asked again — JoinAccept re-sent");
                     return;
                 }
@@ -450,6 +570,14 @@ public sealed class MpSession : IDisposable
                 _t.Send(peer, accept);
                 OnPlayerJoined?.Invoke(peer, name);
                 Broadcast(new MpWriter().U8((byte)MpMsg.PlayerJoined).U8((byte)peer).Str(name).ToArray());
+                _roster[peer] = new MpRosterEntry(peer, name, false);
+                RosterChanged();
+                if (InProgress is { } ip)
+                {
+                    SendInProgressStart(peer);
+                    _startRepeats[peer] = 3;
+                    NetLog.Info($"session: player {peer} joined a game in progress — sent GameStart '{ip.Region}'");
+                }
                 // Catch the late joiner up on every known character card.
                 foreach (var info in _infos.Values)
                     _t.Send(peer, BuildPlayerInfoFrame(info));
@@ -482,6 +610,35 @@ public sealed class MpSession : IDisposable
                 var chore = new MpChore(r.U8(), r.U8(), r.U8());
                 if (r.Bad) { NetLog.Warn($"session: malformed ClientState from peer {peer} — dropped"); return; }
                 _players[peer] = new MpPlayerState((byte)peer, x, y, z, yaw, life, flags, chore);
+                break;
+            }
+            case MpMsg.Ready when IsHost:
+            {
+                bool ready = r.U8() != 0;
+                if (r.Bad) { NetLog.Warn($"session: malformed Ready from peer {peer} — dropped"); return; }
+                if (!_roster.TryGetValue(peer, out var e))
+                { NetLog.Warn($"session: Ready from peer {peer}, which has not joined — dropped"); return; }
+                if (e.Ready == ready) { _t.Send(peer, BuildRosterFrame()); return; }  // asked again: its roster was lost
+                _roster[peer] = e with { Ready = ready };
+                NetLog.Info($"session: player {peer} '{e.Name}' is {(ready ? "ready" : "not ready")}");
+                RosterChanged();
+                break;
+            }
+            case MpMsg.Roster when !IsHost:
+            {
+                int n = r.U8();
+                var list = new List<MpRosterEntry>(n);
+                for (int i = 0; i < n && !r.Bad; i++)
+                {
+                    int p = r.U8(); bool ready = r.U8() != 0; string name = r.Str();
+                    list.Add(new MpRosterEntry(p, name, ready));
+                }
+                if (r.Bad) { NetLog.Warn("session: truncated Roster — dropped"); return; }
+                if (list.Count == _roster.Count && list.TrueForAll(e => _roster.TryGetValue(e.Player, out var o) && o == e))
+                    return;   // the periodic copy of what we already show
+                _roster.Clear();
+                foreach (var e in list) _roster[e.Player] = e;
+                OnRoster?.Invoke(list);
                 break;
             }
             case MpMsg.Chat when IsHost:
@@ -602,6 +759,7 @@ public sealed class MpSession : IDisposable
                 ApplySnapshot?.Invoke(snap);
                 OnJoinAccepted?.Invoke(assigned);
                 NetLog.Info($"session: join accepted as player {assigned}, snapshot {snap.Length}B applied");
+                if (_wantReady) { _readyRetryTimer = 0; SendReady(); }   // READY was clicked while joining
                 break;
             }
             case MpMsg.JoinReject when !IsHost:
@@ -636,7 +794,10 @@ public sealed class MpSession : IDisposable
                     float x = r.F32(), y = r.F32(), z = r.F32(), yaw = r.F32();
                     ushort life = r.U16(); byte flags = r.U8();
                     var chore = new MpChore(r.U8(), r.U8(), r.U8());
-                    if (pid != LocalPlayerId) list.Add(new MpPlayerState(pid, x, y, z, yaw, life, flags, chore));
+                    if (r.Bad) break;
+                    if (pid == LocalPlayerId) OutOfHostView = (flags & (byte)MpPlayerFlags.OutOfHostView) != 0;
+                    else list.Add(new MpPlayerState(pid, x, y, z, yaw, life, flags, chore));
+                    if (pid == 0) HostState = new MpPlayerState(pid, x, y, z, yaw, life, flags, chore);
                 }
                 if (r.Bad) { NetLog.Warn("session: truncated PlayerDelta — dropped"); return; }
                 if (list.Count > 0) ApplyPlayerStates?.Invoke(list);
@@ -647,8 +808,9 @@ public sealed class MpSession : IDisposable
                 string region = r.Str();
                 int diff = r.U8();
                 if (r.Bad) { NetLog.Error("session: malformed GameStart — ignored"); return; }
+                if (OnGameStart is null) return;   // already in the game: a join-in-progress repeat
                 NetLog.Info($"session: received GameStart region='{region}' diff={diff}");
-                OnGameStart?.Invoke(region, diff);
+                OnGameStart.Invoke(region, diff);
                 break;
             }
             case MpMsg.PlayerJoined:
@@ -687,3 +849,7 @@ public sealed class MpSession : IDisposable
         _t.PeerDisconnected -= OnPeerGone;
     }
 }
+
+/// <summary>One row of the staging roster: the player id (the host is 0), the
+/// name the player joined with, and whether the player is ready.</summary>
+public readonly record struct MpRosterEntry(int Player, string Name, bool Ready);

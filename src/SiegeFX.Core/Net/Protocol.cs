@@ -21,6 +21,7 @@ public enum MpMsg : byte
                        // actor (friend-trust: the client owns its own damage roll): [scid u32][damage f32]
     ClientInfo  = 7,   // client→host (host stores + relays as PlayerInfo): this player's
                        // character card — appearance axes + name/class/stats. See MpPlayerInfo.
+    Ready       = 8,   // client→host: this player's mark in the staging area: [ready u8]
     // host → client
     JoinAccept  = 10,  // [assignedPlayer u8][worldSnapshotLen u32][snapshot bytes]
     JoinReject  = 11,  // [reasonLen u8][reason utf8]
@@ -46,6 +47,8 @@ public enum MpMsg : byte
     PropBreak      = 27, // any→host→others: a breakable prop shattered [scid u32]
     ActorSpawn     = 28, // host→client: a runtime-spawned (generator) actor the host owns
                          // [scid u32][templateLen u8][template][x f32][y f32][z f32]
+    Roster         = 29, // host→client: everyone in the game, host first, as the host knows it:
+                         // [count u8][ (player u8, ready u8, nameLen u8, name utf8) * ]
 }
 
 /// <summary>Wire-protocol identity. Bump <see cref="Version"/> whenever a
@@ -56,9 +59,11 @@ public enum MpMsg : byte
 /// human-readable reason.</summary>
 public static class MpProtocol
 {
-    public const ushort Version = 6;   // v2: ClientInfo/PlayerInfo character cards; v3: Brotli JoinAccept snapshot;
+    public const ushort Version = 8;   // v2: ClientInfo/PlayerInfo character cards; v3: Brotli JoinAccept snapshot;
                                         // v4: PlayerHit, PropBreak, ActorSpawn; v5: chores in the pose frames;
-                                        // v6: the card's hair-color byte carries the creator's head
+                                        // v6: Ready + Roster (the staging area's ready marks);
+                                        // v7: weapon, shield and stance on the character card;
+                                        // v8: the card's hair-color byte carries the creator's head
 }
 
 /// <summary>The JoinAccept world snapshot is the save JSON, indented: 130 kB
@@ -99,7 +104,11 @@ public static class MpSnapshot
 public enum MpInputCmd : byte { Move = 0, Attack = 1, CastPrimary = 2, CastSecondary = 3, Pickup = 4, Stop = 5 }
 
 /// <summary>Flag bits in a player-state frame (<see cref="MpPlayerState.Flags"/>).</summary>
-[Flags] public enum MpPlayerFlags : byte { None = 0, Moving = 1, Dead = 2 }
+/// <summary>OutOfHostView: set by the host on a player its camera cannot see
+/// (the co-op leash: "if the host can't see the player, it's too far").
+/// Ghost: the player chose "Respawn as Ghost" after dying (drawn pale and
+/// see-through; enemies ignore it).</summary>
+[Flags] public enum MpPlayerFlags : byte { None = 0, Moving = 1, Dead = 2, OutOfHostView = 4, Ghost = 8 }
 
 /// <summary>Bounds-checked writer — grows a pooled buffer; never throws on
 /// caller data.</summary>
@@ -183,21 +192,28 @@ public readonly record struct MpPlayerState(byte Player, float X, float Y, float
 /// creator's head choice, which also picks the list Style indexes). Sent as
 /// ClientInfo after joining and whenever it changes; the host stamps the
 /// player id and fans it out as PlayerInfo.</summary>
+/// <remarks>v7: the gear in hand — the wielded weapon's and the shield's
+/// template names (empty = none) and the owner's animation stance (255 =
+/// the template default), so the other machines draw the same weapon and
+/// play the swings rigged for it, not the bare-handed ones.</remarks>
 public readonly record struct MpPlayerInfo(
     byte Player, byte Gender, byte Face, byte Style, byte Head, byte Shirt, byte Pants,
     string HeroName, string ClassName,
     ushort Str, ushort Dex, ushort Intel,
-    byte Melee, byte Ranged, byte NMagic, byte CMagic)
+    byte Melee, byte Ranged, byte NMagic, byte CMagic,
+    string Weapon = "", string Shield = "", byte Stance = 255)
 {
     public void WriteBody(MpWriter w)
     {
         w.U8(Gender).U8(Face).U8(Style).U8(Head).U8(Shirt).U8(Pants)
          .Str(HeroName ?? "").Str(ClassName ?? "")
          .U16(Str).U16(Dex).U16(Intel)
-         .U8(Melee).U8(Ranged).U8(NMagic).U8(CMagic);
+         .U8(Melee).U8(Ranged).U8(NMagic).U8(CMagic)
+         .Str(Weapon ?? "").Str(Shield ?? "").U8(Stance);
     }
     public static MpPlayerInfo ReadBody(ref MpReader r, byte player)
         => new(player, r.U8(), r.U8(), r.U8(), r.U8(), r.U8(), r.U8(),
                r.Str(), r.Str(), r.U16(), r.U16(), r.U16(),
-               r.U8(), r.U8(), r.U8(), r.U8());
+               r.U8(), r.U8(), r.U8(), r.U8(),
+               r.Str(), r.Str(), r.U8());
 }
