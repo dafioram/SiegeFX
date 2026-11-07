@@ -1677,20 +1677,9 @@ public sealed class RenderHost : IDisposable
     private List<string> _ccShirt = new();
     private List<string> _ccPant  = new();
     private readonly Dictionary<string, GlTexture?> _ccCompCache = new();
-    // Hair-color palette (target hair tints, 0..1 per channel). Head picks the
-    // style; this recolors it so the same style can be any colour.
-    private static readonly (float R, float G, float B)[] HairPalette =
-    {
-        (0.10f, 0.09f, 0.08f), // black
-        (0.27f, 0.18f, 0.11f), // dark brown
-        (0.45f, 0.30f, 0.16f), // brown
-        (0.63f, 0.46f, 0.26f), // light brown
-        (0.82f, 0.68f, 0.40f), // blond
-        (0.56f, 0.24f, 0.13f), // auburn
-        (0.60f, 0.60f, 0.58f), // grey
-        (0.88f, 0.86f, 0.82f), // platinum
-    };
-
+    // Each gender's option lists, kept once built: remote players of the other
+    // gender look theirs up every frame.
+    private readonly Dictionary<HeroGender, (List<string> Hair, List<string> Skin, List<string> Shirt, List<string> Pant)> _ccOptions = new();
     private sealed class EquippedLayer
     {
         public required SiegeFX.Core.Assets.AspMesh Asp { get; init; }
@@ -1699,6 +1688,9 @@ public sealed class RenderHost : IDisposable
         public required string SlotName { get; init; }
         public required string ItemRef { get; init; }
         public required string MeshBaseName { get; init; }
+        /// <summary>The hero's head mesh (the creator's Head): drawn with the
+        /// hero's own texture slots, skin + hair and clothing, like the body.</summary>
+        public bool UsesBodyTextures { get; init; }
     }
 
     // Phase 9-SC-10 — bone-attached props other than the primary weapon.
@@ -5199,6 +5191,7 @@ public sealed class RenderHost : IDisposable
         _skinShader.SetMatrix4Array("uBones[0]", _skinScratch.AsSpan(0, bones));
 
         var subsets = mesh.Subsets;
+        _player.GlMesh.HideMarked = PlayerHeadReplaced();   // the head layer stands in
         if (subsets.Length == 0)
         {
             BindActorSlot(_player.Actor, 0);
@@ -5217,6 +5210,7 @@ public sealed class RenderHost : IDisposable
                 _player.GlMesh.DrawSubset(sub.FirstTriangle, sub.TriangleCount);
             }
         }
+        _player.GlMesh.HideMarked = false;   // the GL mesh is shared
         foreach (var layer in _equippedLayers)
         {
             int lb = layer.Asp.BoneCount;
@@ -5227,6 +5221,7 @@ public sealed class RenderHost : IDisposable
             else
                 for (int i = 0; i < lb; i++) _skinScratch[i] = Matrix4x4.Identity;
             _skinShader.SetMatrix4Array("uBones[0]", _skinScratch.AsSpan(0, lb));
+            if (layer.UsesBodyTextures) { DrawBodyTexturedLayer(layer); continue; }
             if (layer.Texture is not null)
             {
                 layer.Texture.Bind(TextureUnit.Texture0);
@@ -5382,6 +5377,7 @@ public sealed class RenderHost : IDisposable
         _skinShader.SetMatrix4Array("uBones[0]", _skinScratch.AsSpan(0, bones));
 
         var subsets = mesh.Subsets;
+        _player.GlMesh.HideMarked = PlayerHeadReplaced();   // the head layer stands in
         if (subsets.Length == 0)
         {
             BindActorSlot(_player.Actor, 0);
@@ -5400,6 +5396,7 @@ public sealed class RenderHost : IDisposable
                 _player.GlMesh.DrawSubset(sub.FirstTriangle, sub.TriangleCount);
             }
         }
+        _player.GlMesh.HideMarked = false;   // the GL mesh is shared
 
         // Worn equipment layers (helmet/armor) share the biped skeleton, so
         // the portrait shows gear exactly like retail's live portrait does.
@@ -5413,6 +5410,7 @@ public sealed class RenderHost : IDisposable
             else
                 for (int i = 0; i < lb; i++) _skinScratch[i] = Matrix4x4.Identity;
             _skinShader.SetMatrix4Array("uBones[0]", _skinScratch.AsSpan(0, lb));
+            if (layer.UsesBodyTextures) { DrawBodyTexturedLayer(layer); continue; }
             if (layer.Texture is not null)
             {
                 layer.Texture.Bind(TextureUnit.Texture0);
@@ -6761,7 +6759,7 @@ public sealed class RenderHost : IDisposable
     private static HeroVariantPicker MpPickerFromInfo(in SiegeFX.Core.Net.MpPlayerInfo i) => new()
     {
         Gender   = i.Gender == 1 ? HeroGender.Girl : HeroGender.Boy,
-        FaceIdx  = i.Face,  StyleIdx = i.Style, ColorIdx = i.Color,
+        FaceIdx  = i.Face,  StyleIdx = i.Style, HeadIdx = i.Head,
         ShirtIdx = i.Shirt, PantsIdx = i.Pants,
     };
 
@@ -6790,7 +6788,7 @@ public sealed class RenderHost : IDisposable
         return new SiegeFX.Core.Net.MpPlayerInfo(
             (byte)(_mpNetSession?.LocalPlayerId ?? 0),
             (byte)(pick?.Gender == HeroGender.Girl ? 1 : 0),
-            B(pick?.FaceIdx ?? 0), B(pick?.StyleIdx ?? 0), B(pick?.ColorIdx ?? 0),
+            B(pick?.FaceIdx ?? 0), B(pick?.StyleIdx ?? 0), B(pick?.HeadIdx ?? 0),
             B(pick?.ShirtIdx ?? 0), B(pick?.PantsIdx ?? 0),
             string.IsNullOrEmpty(_heroName) ? "Adventurer" : _heroName,
             _playerStartingClass,
@@ -15613,7 +15611,13 @@ void main()
     {
         if (_ccOptGender == gender && _ccSkin.Count > 0) return;
         _ccOptGender = gender;
-        _ccCompCache.Clear();
+        // The composite and hair-list caches stay: their keys name the
+        // gender's own textures and heads.
+        if (_ccOptions.TryGetValue(gender, out var known))
+        {
+            (_ccHair, _ccSkin, _ccShirt, _ccPant) = known;
+            return;
+        }
         string stem = gender == HeroGender.Girl ? "fg" : "fb";
         _ccHair  = StrippedSorted($"b_c_gah_{stem}_hair_");
         _ccShirt = StrippedSorted("b_c_pos_a1_shrt_");
@@ -15638,7 +15642,8 @@ void main()
         foreach (var s in skins) if (!IsBlankTexture(s)) _ccSkin.Add(s);
         if (_ccSkin.Count == 0) _ccSkin = skins; // never leave the face with nothing
         Console.WriteLine($"[cc-options] {stem}: styles={_ccHair.Count} skins={_ccSkin.Count}/{skins.Count} " +
-                          $"shirts={_ccShirt.Count} pants={_ccPant.Count} colors={HairPalette.Length}");
+                          $"shirts={_ccShirt.Count} pants={_ccPant.Count}");
+        if (_ccSkin.Count > 0) _ccOptions[gender] = (_ccHair, _ccSkin, _ccShirt, _ccPant);
     }
 
     private List<string> StrippedSorted(string prefix)
@@ -15707,8 +15712,8 @@ void main()
         {
             var skin = PickVariant(_ccSkin, picker.FaceIdx);
             if (skin is null) return null;
-            var hair = PickVariant(_ccHair, picker.StyleIdx);
-            return CompositeSkin(skin, hair, picker.ColorIdx);
+            var hair = PickVariant(HairListFor(picker), picker.StyleIdx);
+            return CompositeSkin(skin, hair);
         }
         if (slot == 1)
         {
@@ -15719,33 +15724,112 @@ void main()
         return null;
     }
 
-    private GlTexture? CompositeSkin(string skinName, string? hairName, int colorIdx)
+    // The creator offers hair_001..010 (011 on are NPC hairs). The farm
+    // girl's ten are one style in ten colors, the same on every head. The
+    // farm boy's split in two sets: 001..006 paint the scalp and face, while
+    // 007..010 also paint the strips below the face that the mohawk and bun
+    // heads map their crests onto. The original gives his plain heads the
+    // scalp set, the mohawk and bun the crest set (so a crest never shows
+    // skin, a mohawk never a long-hair scalp), and the bald body head both,
+    // crest set first. The split is read off the textures; when every hair
+    // paints the strips (the girl's ponytails) there is none.
+    private const float HairStripTopV = 0.6f;
+    private const int CreatorHairCount = 10;
+    private readonly Dictionary<string, List<string>> _ccHairForHead = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The hair overlays the Hair button walks for the picker's head.</summary>
+    private List<string> HairListFor(HeroVariantPicker picker)
     {
-        string key = $"S|{skinName}|{hairName}|{colorIdx}";
+        if (_ccHair.Count == 0 || HeadMeshList(picker) is null) return _ccHair;
+        var head = HeadMeshFor(picker);
+        string key = head ?? $"bald:{picker.Gender}";
+        if (_ccHairForHead.TryGetValue(key, out var hit)) return hit;
+
+        var scalp = new List<string>();
+        var crestSet = new List<string>();
+        foreach (var h in _ccHair)
+        {
+            if (!int.TryParse(h[(h.LastIndexOf('_') + 1)..], out int n) || n < 1 || n > CreatorHairCount) continue;
+            var strips = HairPaintsStrips(h);
+            if (strips is null) continue;
+            (strips == true ? crestSet : scalp).Add(h);
+        }
+        List<string> list = crestSet.Count == 0 || scalp.Count == 0 ? crestSet.Concat(scalp).ToList()
+                          : head is null ? crestSet.Concat(scalp).ToList()
+                          : HeadReachesHairStrips(head) ? crestSet : scalp;
+        if (list.Count == 0) list = _ccHair;
+        _ccHairForHead[key] = list;
+        Console.WriteLine($"[cc-options] {head ?? "bald (body head)"}: hair {string.Join(" ", list.Select(h => h[(h.LastIndexOf('_') + 1)..]))}");
+        return list;
+    }
+
+    /// <summary>The hair index on a new head: the same hair when the new
+    /// head's list has it, else the first (the original's behavior).</summary>
+    private int HairOnNewHead(HeroVariantPicker oldPick, HeroVariantPicker newPick)
+    {
+        var hair = PickVariant(HairListFor(oldPick), oldPick.StyleIdx);
+        int idx = hair is null ? -1
+            : HairListFor(newPick).FindIndex(h => h.Equals(hair, StringComparison.OrdinalIgnoreCase));
+        return Math.Max(0, idx);
+    }
+
+    /// <summary>The creator's starting hair for a gender on the first head:
+    /// /config/character_defaults.gas texture_farmboy_hair /
+    /// texture_farmgirl_hair (the girl's is red), else the first.</summary>
+    private int DefaultHairIdx(HeroGender gender)
+    {
+        var picker = new HeroVariantPicker { Gender = gender };
+        EnsureCreatorOptions(gender);
+        var list = HairListFor(picker);
+        string key = gender == HeroGender.Girl ? "texture_farmgirl_hair" : "texture_farmboy_hair";
+        if (_playResolver is null || !_playResolver.TryLoadByBasename("character_defaults.gas", out var bytes)) return 0;
+        try
+        {
+            foreach (var r in SiegeFX.Core.Assets.GasDocument.Load(bytes).Roots)
+                foreach (var a in r.Attributes)
+                    if (a.Name.Equals(key, StringComparison.OrdinalIgnoreCase))
+                        return Math.Max(0, list.FindIndex(h => h.Equals(a.Value.Trim(), StringComparison.OrdinalIgnoreCase)));
+        }
+        catch { }
+        return 0;
+    }
+
+    // True when the head maps part of itself onto the strips below the face.
+    private bool HeadReachesHairStrips(string headMesh)
+    {
+        if (_playResolver is null || !_playResolver.TryLoadModel(headMesh, out var bytes)) return false;
+        try
+        {
+            var asp = SiegeFX.Core.Assets.AspMesh.Load(bytes);
+            foreach (var c in asp.Corners) if (c.Uv.Y > HairStripTopV) return true;
+        }
+        catch { }
+        return false;
+    }
+
+    // True when a hair overlay paints the strips below the face (over 1%);
+    // null when it doesn't load (the farm boy's hair_029), so no set offers it.
+    private bool? HairPaintsStrips(string hairName)
+    {
+        var rgba = LoadRawRgba(hairName, out int w, out int h);
+        if (rgba is null || w == 0 || h == 0) return null;
+        int y0 = (int)(h * HairStripTopV), on = 0;
+        for (int y = y0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (rgba[(y * w + x) * 4 + 3] > 32) on++;
+        return on * 100 > (h - y0) * w;
+    }
+
+    /// <summary>Slot 0: the skin with the hair overlay over it, in the
+    /// overlay's own colors, as the original composites skin_NNN + hair_NNN
+    /// (its saves name the pair: "b_c_gah_fb_skin_007,b_c_gah_fb_hair_005").</summary>
+    private GlTexture? CompositeSkin(string skinName, string? hairName)
+    {
+        string key = $"S|{skinName}|{hairName}";
         if (_ccCompCache.TryGetValue(key, out var hit)) return hit;
         var baseRgba = LoadRawRgba(skinName, out int w, out int h);
         if (baseRgba is null) { _ccCompCache[key] = null; return null; }
-        if (hairName is not null)
-        {
-            var hair = LoadRawRgba(hairName, out int hw, out int hh);
-            if (hair is not null && hw == w && hh == h)
-            {
-                var c = HairPalette[((colorIdx % HairPalette.Length) + HairPalette.Length) % HairPalette.Length];
-                for (int i = 0; i < baseRgba.Length; i += 4)
-                {
-                    float a = hair[i + 3] / 255f;
-                    if (a <= 0f) continue;
-                    // Neutralize the overlay to luminance, then tint — so Head
-                    // sets the shape and Hair sets the colour independently.
-                    float luma = (0.299f * hair[i] + 0.587f * hair[i + 1] + 0.114f * hair[i + 2]) / 255f;
-                    float shade = 0.30f + 0.85f * luma;
-                    if (shade > 1f) shade = 1f;
-                    baseRgba[i]     = (byte)(Math.Clamp(c.R * shade, 0f, 1f) * 255f * a + baseRgba[i]     * (1 - a));
-                    baseRgba[i + 1] = (byte)(Math.Clamp(c.G * shade, 0f, 1f) * 255f * a + baseRgba[i + 1] * (1 - a));
-                    baseRgba[i + 2] = (byte)(Math.Clamp(c.B * shade, 0f, 1f) * 255f * a + baseRgba[i + 2] * (1 - a));
-                }
-            }
-        }
+        AlphaOver(baseRgba, hairName, w, h);
         var tex = new GlTexture(_gl!, baseRgba, w, h, nearestFilter: false);
         _ccCompCache[key] = tex;
         return tex;
@@ -15828,7 +15912,7 @@ void main()
                     $"player slot {textureIndex}: creator composite " +
                     $"(gender={_playerPicker.Gender} body={_playerPicker.BodyTypeIdx} " +
                     $"face={_playerPicker.FaceIdx} style={_playerPicker.StyleIdx} " +
-                    $"color={_playerPicker.ColorIdx} shirt={_playerPicker.ShirtIdx} " +
+                    $"head={_playerPicker.HeadIdx} shirt={_playerPicker.ShirtIdx} " +
                     $"pants={_playerPicker.PantsIdx}) -> " +
                     $"{(t is null ? "null (texset fallback)" : "COMPOSITE TEXTURE")}");
                 if (t is not null) return t;
@@ -24532,6 +24616,8 @@ void main()
                 // the state-machine edge.
                 if (now == Hud.FrontendScene.ScreenState.CharacterSelect)
                 {
+                    _creator.DefaultHair ??= DefaultHairIdx;
+                    _creator.HairOnNewHead ??= HairOnNewHead;
                     _creator.Reset();
                 }
             }
@@ -26331,7 +26417,7 @@ void main()
             // fields above made the trip.
             psi.Environment["SIEGEFX_HERO_FACE"]     = _creator.Picker.FaceIdx.ToString();
             psi.Environment["SIEGEFX_HERO_STYLE"]    = _creator.Picker.StyleIdx.ToString();
-            psi.Environment["SIEGEFX_HERO_COLOR"]    = _creator.Picker.ColorIdx.ToString();
+            psi.Environment["SIEGEFX_HERO_HEAD"]     = _creator.Picker.HeadIdx.ToString();
             psi.Environment["SIEGEFX_HERO_SHIRT"]    = _creator.Picker.ShirtIdx.ToString();
             psi.Environment["SIEGEFX_HERO_PANTSIDX"] = _creator.Picker.PantsIdx.ToString();
             // The typed hero name also has to survive the relaunch (only the
@@ -26460,7 +26546,7 @@ void main()
                 {
                     psi.Environment["SIEGEFX_HERO_FACE"]     = v.FaceIdx.ToString();
                     psi.Environment["SIEGEFX_HERO_STYLE"]    = Math.Max(0, v.StyleIdx).ToString();
-                    psi.Environment["SIEGEFX_HERO_COLOR"]    = Math.Max(0, v.ColorIdx).ToString();
+                    psi.Environment["SIEGEFX_HERO_HEAD"]     = Math.Max(0, v.HeadIdx).ToString();
                     psi.Environment["SIEGEFX_HERO_SHIRT"]    = Math.Max(0, v.ShirtIdx).ToString();
                     psi.Environment["SIEGEFX_HERO_PANTSIDX"] = Math.Max(0, v.PantsIdx).ToString();
                 }
@@ -28061,6 +28147,8 @@ void main()
         {
             _pendingSpawner = spawner;
             _pendingNavMesh = navMesh;
+            _creator.DefaultHair ??= DefaultHairIdx;
+            _creator.HairOnNewHead ??= HairOnNewHead;
             _creator.Reset();
             // Phase 22-SC-MUSIC-B — kick the menu music as the creator
             // panel comes up. DS1's frontend track is s_m_frontend.mp3
@@ -28397,6 +28485,8 @@ void main()
                         // Drawn inside the chrome (FrontendScene.DrawInBox),
                         // between the stone wall and the frame.
                         _heroPreview.EnsurePreview(_creator.Picker);
+                        _heroPreview.HeadMesh = HeadMeshFor(_creator.Picker);
+                        _creator.HeadCount = HeadChoiceCount(_creator.Picker);
                         _heroPreview.Tick(dt);
                     }
                     // Per-button asp render + hover overlays + name overlay.
@@ -29540,6 +29630,145 @@ void main()
                         $"slot={layer.OverrideTextureSlot} tex='{layer.OverrideBaseName}'");
                     break;
             }
+        }
+        // The creator's head, worn when no helmet is: a whole head mesh in
+        // place of the body's own head (the original's custom_head).
+        if (!_equippedLayers.Any(l => string.Equals(l.SlotName, "es_head", StringComparison.OrdinalIgnoreCase)))
+            LoadPlayerHeadLayer(playerTemplate);
+    }
+
+    // Head meshes per armor_version (m_c_<av>_hlmt_head-*), sorted.
+    private readonly Dictionary<string, List<string>> _headMeshLists = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The head meshes a hero's creator offers
+    /// (m_c_&lt;armor_version&gt;_hlmt_head-*, sorted); null when the template
+    /// ships none.</summary>
+    private List<string>? HeadMeshList(HeroVariantPicker? picker)
+    {
+        if (_templateStore is null || _playResolver is null) return null;
+        string tplName = picker?.Gender == HeroGender.Girl ? "farmgirl" : "farmboy";
+        if (!_templateStore.TryGet(tplName, out var tpl) || tpl is null) return null;
+        var av = _templateStore.GetAttribute(tpl, "body", "armor_version")?.Trim();
+        if (string.IsNullOrEmpty(av)) return null;
+        if (!_headMeshLists.TryGetValue(av, out var list))
+        {
+            list = _playResolver.BasenamesWithPrefix($"m_c_{av}_hlmt_head")
+                .Where(b => b.EndsWith(".asp", StringComparison.OrdinalIgnoreCase))
+                .Select(b => b[..^4]).Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(b => b, StringComparer.OrdinalIgnoreCase).ToList();
+            _headMeshLists[av] = list;
+        }
+        return list.Count > 0 ? list : null;
+    }
+
+    /// <summary>The Head button's choices: the head meshes, then the body's
+    /// own head (bald; the original saves it as custom_head = default).</summary>
+    private int HeadChoiceCount(HeroVariantPicker? picker)
+        => HeadMeshList(picker) is { } list ? list.Count + 1 : 0;
+
+    /// <summary>The head mesh the creator's Head picks for a hero (the
+    /// original's custom_head); null for the body's own head, the last
+    /// choice, or when the template ships no head meshes.</summary>
+    private string? HeadMeshFor(HeroVariantPicker? picker)
+    {
+        var list = HeadMeshList(picker);
+        if (list is null) return null;
+        int idx = Math.Clamp(picker?.HeadIdx ?? 0, 0, list.Count);
+        return idx < list.Count ? list[idx] : null;
+    }
+
+    private void LoadPlayerHeadLayer(SiegeFX.Core.Assets.Template playerTemplate)
+    {
+        if (_gl is null || _playResolver is null || _player is null) return;
+        var name = HeadMeshFor(_playerPicker ?? _heroVariant);
+        if (name is null || !_playResolver.TryLoadModel(name, out var bytes)) return;
+        SiegeFX.Core.Assets.AspMesh asp;
+        SkinnedMesh sm;
+        try
+        {
+            asp = SiegeFX.Core.Assets.AspMesh.Load(bytes);
+            if (!asp.HasSkin) return;
+            sm = new SkinnedMesh(_gl, asp);
+        }
+        catch (Exception ex) { Console.WriteLine($"  equip: head '{name}' failed: {ex.Message}"); return; }
+        _equippedLayers.Add(new EquippedLayer
+        {
+            Asp = asp, Mesh = sm, Texture = null, SlotName = "head", ItemRef = name,
+            MeshBaseName = name, UsesBodyTextures = true,
+        });
+        _player.GlMesh?.HideBoneTriangles(_player.Actor.Mesh, HeroPreviewRenderer.HeadBone(_player.Actor.Mesh));
+        Console.WriteLine($"  equip: head '{name}' in place of the body's own");
+    }
+
+    /// <summary>True while a head mesh stands in for the hero body's own head.</summary>
+    private bool PlayerHeadReplaced()
+    {
+        foreach (var l in _equippedLayers) if (l.UsesBodyTextures) return true;
+        return false;
+    }
+
+    /// <summary>Draw a layer that takes the hero's texture slots (the head).</summary>
+    private void DrawBodyTexturedLayer(EquippedLayer layer)
+    {
+        if (_player is null) return;
+        var subs = layer.Asp.Subsets;
+        if (subs.Length == 0) { BindActorSlot(_player.Actor, 0); layer.Mesh.Draw(); return; }
+        foreach (var sub in subs)
+        {
+            BindActorSlot(_player.Actor, Math.Max(0, sub.TextureIndex));
+            layer.Mesh.DrawSubset(sub.FirstTriangle, sub.TriangleCount);
+        }
+    }
+
+    // Head meshes for other players' heroes, by mesh name (shared, like the
+    // body meshes); null = failed to load.
+    private readonly Dictionary<string, (SiegeFX.Core.Assets.AspMesh Asp, SkinnedMesh Mesh)?> _remoteHeads =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The head mesh another player picked for their hero (from their
+    /// character card), its body's own head marked hidden; null for the bald
+    /// body head, no card, or a mesh that will not load.</summary>
+    private (SiegeFX.Core.Assets.AspMesh Asp, SkinnedMesh Mesh)? RemoteHeadFor(ActorRenderState s)
+    {
+        if (_gl is null || _playResolver is null || s.GlMesh is null) return null;
+        if (!_netPickers.TryGetValue(s.Actor, out var pick)) return null;
+        var name = HeadMeshFor(pick);
+        if (name is null) return null;
+        if (!_remoteHeads.TryGetValue(name, out var head))
+        {
+            head = null;
+            try
+            {
+                if (_playResolver.TryLoadModel(name, out var bytes))
+                {
+                    var asp = SiegeFX.Core.Assets.AspMesh.Load(bytes);
+                    if (asp.HasSkin && asp.BoneCount <= SkinnedMesh.MaxBones) head = (asp, new SkinnedMesh(_gl, asp));
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"[mp] head '{name}' failed: {ex.Message}"); }
+            _remoteHeads[name] = head;
+        }
+        if (head is not null)
+            s.GlMesh.HideBoneTriangles(s.Actor.Mesh, HeroPreviewRenderer.HeadBone(s.Actor.Mesh));
+        return head;
+    }
+
+    /// <summary>Draw another player's head mesh in their hero's pose and skin
+    /// (uModel is still the body's).</summary>
+    private void DrawRemoteHead(ActorRenderState s, (SiegeFX.Core.Assets.AspMesh Asp, SkinnedMesh Mesh) head,
+                                SiegeFX.Core.Assets.PrsAnimation? clip, float t)
+    {
+        int lb = head.Asp.BoneCount;
+        if (_skinScratch.Length < lb) _skinScratch = new Matrix4x4[Math.Max(lb, 64)];
+        if (clip is not null) AnimationRuntime.ComputeSkinMatrices(head.Asp, clip, t, _skinScratch);
+        else for (int i = 0; i < lb; i++) _skinScratch[i] = Matrix4x4.Identity;
+        _skinShader!.SetMatrix4Array("uBones[0]", _skinScratch.AsSpan(0, lb));
+        var subs = head.Asp.Subsets;
+        if (subs.Length == 0) { BindActorSlot(s.Actor, 0); head.Mesh.Draw(); return; }
+        foreach (var sub in subs)
+        {
+            BindActorSlot(s.Actor, Math.Max(0, sub.TextureIndex));
+            head.Mesh.DrawSubset(sub.FirstTriangle, sub.TriangleCount);
         }
     }
 
@@ -39889,6 +40118,8 @@ void main()
                 var clips = s.Actor.Clips;
                 int boneCount = s.Actor.Mesh.BoneCount;
                 ReadOnlySpan<Matrix4x4> skin;
+                SiegeFX.Core.Assets.PrsAnimation? drawClip = null;
+                float drawT = 0f;
                 if (clips.Length == 0)
                 {
                     // No parsable PRS for this actor (shipped 0x0202 clips we don't support
@@ -39926,6 +40157,7 @@ void main()
                         _skinScratch = new Matrix4x4[Math.Max(boneCount, 64)];
                     AnimationRuntime.ComputeSkinMatrices(s.Actor.Mesh, clip, t, _skinScratch, ShownBlend(s));
                     skin = _skinScratch.AsSpan(0, boneCount);
+                    drawClip = clip; drawT = t;
                 }
                 // SC-ACTOR-SCALE — apply the creature's authored [aspect] scale_base
                 // (× scale_multiplier) to the visual model only. Most mobs are 1.0
@@ -39945,6 +40177,12 @@ void main()
                 // monsters) issue one bind + one DrawSubset, identical in cost to the
                 // old single Draw() path.
                 var subsets = s.Actor.Mesh.Subsets;
+                // The hero's own head gives way to the creator's head mesh
+                // (a layer, drawn below). The GL mesh is shared: reset after.
+                // (The layer pass skips a dead hero, so a dead one keeps his.)
+                // Another player's hero wears the head its owner picked.
+                var remoteHead = !s.IsPlayer && !s.IsDead ? RemoteHeadFor(s) : null;
+                s.GlMesh.HideMarked = (s.IsPlayer && !s.IsDead && PlayerHeadReplaced()) || remoteHead is not null;
                 if (subsets.Length == 0)
                 {
                     BindActorSlot(s.Actor, 0);
@@ -39978,6 +40216,8 @@ void main()
                     if (_subsetTintActive)
                         _skinShader.SetInt("uSubsetTintActive", 0);
                 }
+                s.GlMesh.HideMarked = false;
+                if (remoteHead is { } rh) DrawRemoteHead(s, rh, drawClip, drawT);
             }
             // SC-ACTOR-TSD — never let a lava-spirit layer-2 binding leak into the
             // equipment/weapon passes below (they bind Texture0 only and would
@@ -40097,6 +40337,7 @@ void main()
                         for (int i = 0; i < boneCount; i++) _skinScratch[i] = Matrix4x4.Identity;
                     }
                     _skinShader.SetMatrix4Array("uBones[0]", _skinScratch.AsSpan(0, boneCount));
+                    if (layer.UsesBodyTextures) { DrawBodyTexturedLayer(layer); continue; }
 
                     var subsets = layer.Asp.Subsets;
                     if (subsets.Length == 0)
@@ -41774,6 +42015,8 @@ void main()
                         // Drawn inside the chrome (FrontendScene.DrawInBox),
                         // between the stone wall and the frame.
                         _heroPreview.EnsurePreview(_creator.Picker);
+                        _heroPreview.HeadMesh = HeadMeshFor(_creator.Picker);
+                        _creator.HeadCount = HeadChoiceCount(_creator.Picker);
                         _heroPreview.Tick((float)dt);
                     }
 
@@ -43309,7 +43552,7 @@ void main()
                     PantsSuffix = snapPick.PantsSuffix,
                     FaceIdx     = snapPick.FaceIdx,
                     StyleIdx    = snapPick.StyleIdx,
-                    ColorIdx    = snapPick.ColorIdx,
+                    HeadIdx     = snapPick.HeadIdx,
                     ShirtIdx    = snapPick.ShirtIdx,
                     PantsIdx    = snapPick.PantsIdx,
                 };
@@ -44190,7 +44433,7 @@ void main()
             bool realVariant = ps.Variant is not null
                 && (ps.Variant.FaceIdx >= 0 || ps.Variant.BodyTypeIdx >= 0);
             BodyDiag("load-variant",
-                $"load: saved variant {(ps.Variant is null ? "<none>" : $"gender={ps.Variant.Gender} body={ps.Variant.BodyTypeIdx} face={ps.Variant.FaceIdx} style={ps.Variant.StyleIdx} color={ps.Variant.ColorIdx} shirt={ps.Variant.ShirtIdx} pants={ps.Variant.PantsIdx}")} " +
+                $"load: saved variant {(ps.Variant is null ? "<none>" : $"gender={ps.Variant.Gender} body={ps.Variant.BodyTypeIdx} face={ps.Variant.FaceIdx} style={ps.Variant.StyleIdx} head={ps.Variant.HeadIdx} shirt={ps.Variant.ShirtIdx} pants={ps.Variant.PantsIdx}")} " +
                 $"-> {(realVariant ? "APPLYING" : "skipped (placeholder)")}; " +
                 $"picker at load: {(_playerPicker is null ? "<null>" : $"gender={_playerPicker.Gender} body={_playerPicker.BodyTypeIdx}")}");
             if (realVariant)
@@ -44208,7 +44451,7 @@ void main()
                     // matching the pre-persistence default look.
                     FaceIdx  = Math.Max(0, ps.Variant.FaceIdx),
                     StyleIdx = Math.Max(0, ps.Variant.StyleIdx),
-                    ColorIdx = Math.Max(0, ps.Variant.ColorIdx),
+                    HeadIdx  = Math.Max(0, ps.Variant.HeadIdx),
                     ShirtIdx = Math.Max(0, ps.Variant.ShirtIdx),
                     PantsIdx = Math.Max(0, ps.Variant.PantsIdx),
                 };
@@ -44249,6 +44492,8 @@ void main()
                 // override path has nothing to do (composite-only variants).
                 _playerPicker = restored;
                 _heroVariant = restored;
+                // The head is a mesh layer: rebuild the layers for the saved one.
+                if (_player is not null) TryLoadPlayerEquipment(_player.Actor.Template);
             }
         }
 
