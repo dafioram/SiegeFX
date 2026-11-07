@@ -5087,6 +5087,8 @@ public sealed class RenderHost : IDisposable
     // frame, and the shape is the frames' (gas rect 13,6,52,52 = 39×46).
     private const float PortraitFov = 0.21f;
     private const float PortraitAspect = 39f / 46f;
+    // How far the portrait's face looks to its left, as in the original's.
+    private const float PortraitTurn = 15f * MathF.PI / 180f;
 
     /// <summary>SC-VIEW-ROTATE — render the full equipped character to the
     /// 256² view target at the current drag yaw. Same studio-lit FBO recipe
@@ -5371,6 +5373,12 @@ public sealed class RenderHost : IDisposable
                 if (look.LengthSquared() > 0.09f) face = Vector3.Normalize(look);
             }
         }
+        // The original's portrait is not quite face-on: the head looks a little
+        // to its left. Swing the camera that far round to the hero's right
+        // (her right is face × up).
+        var right = Vector3.Cross(face, Vector3.UnitY);
+        if (right.LengthSquared() > 1e-6f)
+            face = Vector3.Normalize(face * MathF.Cos(PortraitTurn) + Vector3.Normalize(right) * MathF.Sin(PortraitTurn));
         // Face crop as in the original: the head, crown to chin, fills the
         // frame (0.21 rad at the ~1.15u standoff shows ~0.24u; close-in would
         // fisheye the nose). Aim rides a touch above the head bone (neck
