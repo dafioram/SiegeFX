@@ -84,7 +84,7 @@ public static class OriginalSaveImport
             Variant = new HeroVariantSnapshot
             {
                 Gender = hero.TemplateName.Contains("girl", StringComparison.OrdinalIgnoreCase) ? "girl" : "boy",
-                FaceIdx = 0, StyleIdx = 0, ColorIdx = 0, ShirtIdx = 0, PantsIdx = 0,
+                FaceIdx = 0, StyleIdx = 0, ShirtIdx = 0, PantsIdx = 0,
             },
             MoveOrder = hero.Orders.MoveOrder,
             AtkOrder = hero.Orders.AtkOrder,
