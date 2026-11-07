@@ -5146,6 +5146,27 @@ public sealed class RenderHost : IDisposable
     /// on the GL thread; scene lighting is swapped for a fixed studio key so
     /// a dark crypt doesn't produce a black portrait, then the lighting
     /// stamp is invalidated so the world pass re-uploads its own values.</summary>
+    // Per body mesh: the head bone's own axis that points the way the face
+    // does (the bind pose faces the model's +Z).
+    private readonly Dictionary<SiegeFX.Core.Assets.AspMesh, Vector3> _portraitFaceAxes = new();
+
+    private Vector3 PortraitFaceAxis(SiegeFX.Core.Assets.AspMesh mesh, int headIdx)
+    {
+        if (_portraitFaceAxes.TryGetValue(mesh, out var known)) return known;
+        var rest = AnimationRuntime.ComputeAnimatedBoneWorlds(mesh, null, 0f);
+        var best = Vector3.UnitZ;
+        float bestDot = float.NegativeInfinity;
+        foreach (var a in new[] { Vector3.UnitX, -Vector3.UnitX, Vector3.UnitY, -Vector3.UnitY, Vector3.UnitZ, -Vector3.UnitZ })
+        {
+            var d = Vector3.TransformNormal(a, rest[headIdx]);
+            if (d.LengthSquared() < 1e-8f) continue;
+            float dot = Vector3.Dot(Vector3.Normalize(d), Vector3.UnitZ);
+            if (dot > bestDot) { bestDot = dot; best = a; }
+        }
+        _portraitFaceAxes[mesh] = best;
+        return best;
+    }
+
     private unsafe void RenderPlayerPortrait()
     {
         if (_gl is null || _skinShader is null || _player is null) return;
@@ -5224,6 +5245,22 @@ public sealed class RenderHost : IDisposable
         var face = _playerFacing.LengthSquared() > 0.01f
             ? Vector3.Normalize(new Vector3(_playerFacing.X, 0f, _playerFacing.Z))
             : Vector3.UnitZ;
+        // Face the FACE, as the original's portrait does, not the body: an
+        // idle in a side-on stance (the farm girl's) turned the head into a
+        // near profile. The way the head bone points, kept level; the body's
+        // heading if the head looks straight up or down.
+        if (headIdx >= 0)
+        {
+            var axis = PortraitFaceAxis(mesh, headIdx);
+            var look = Vector3.TransformNormal(Vector3.TransformNormal(axis, _boneWorldsScratch[headIdx]),
+                                               _player.CurrentTransform);
+            if (look.LengthSquared() > 1e-8f)
+            {
+                look = Vector3.Normalize(look);
+                look.Y = 0f;
+                if (look.LengthSquared() > 0.09f) face = Vector3.Normalize(look);
+            }
+        }
         // Face crop as in the original: the head, crown to chin, fills the
         // frame (0.21 rad at the ~1.15u standoff shows ~0.24u; close-in would
         // fisheye the nose). Aim rides a touch above the head bone (neck
