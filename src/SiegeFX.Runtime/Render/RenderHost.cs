@@ -12620,7 +12620,8 @@ void main()
                     _lmbDownAtMs = Environment.TickCount64;
                     _marqueeActive = false;
                     bool ghost = _player?.IsGhost == true;
-                    if (ghost || (!TryClickToTalk(MousePx(m)) && !DispatchAbilityClick(MousePx(m))))
+                    if (HeroDrinkBlocksClick()) { }
+                    else if (ghost || (!TryClickToTalk(MousePx(m)) && !DispatchAbilityClick(MousePx(m))))
                     {
                         TryClickToMove(MousePx(m));
                         // SC-HOLD-MOVE — keep steering while held.
@@ -13080,7 +13081,7 @@ void main()
                         // a talkable NPC, open dialogue; otherwise fall through
                         // to the combat path. Hostile actors don't get talkable
                         // even if they happen to have a [conversation] block.
-                        if (!TryClickToTalk(_rmbDownPos))
+                        if (!HeroDrinkBlocksClick() && !TryClickToTalk(_rmbDownPos))
                         {
                             // Phase 21-SC-ABIL-RMB — RMB respects the selected
                             // ability cell. Cells 0/1 swing the equipped weapon
@@ -25541,7 +25542,8 @@ void main()
                     {
                         _lmbMoveRepeatIn = 0.15f;
                         if (!_dialogue.IsOpen && !_vendor.IsOpen && !_mouseLookActive
-                            && _cursorItem is null && _cursorScroll is null)
+                            && _cursorItem is null && _cursorScroll is null
+                            && !(PlayerDrinking && _selectedPartyIdx.Contains(0)))
                             TryClickToMove(_currentMousePos);
                     }
                 }
@@ -32830,6 +32832,14 @@ void main()
             // next swing/cast (DS1 holds the hero until WE_ANIM_DONE). A hero
             // variant with no 'drnk' clip just holds the bottle (DS1's own
             // "No 'drink' animation in the chore" no-op branch).
+            // The hero stops to drink, whatever it was doing: the walk, a
+            // swing or cast in progress and any queued order end here, and
+            // world clicks are ignored until the drink is done (see
+            // HeroDrinkBlocksClick). The original only lets an idle hero
+            // drink and ignores the potion otherwise; stopping is kinder than
+            // a refused potion, and without it the drink pose slid along the
+            // walk.
+            StopHeroForDrink();
             int drinkIdx = _player.Actor.GetClipIndex("drnk");
             float drinkLen = (drinkIdx >= 0 && drinkIdx < _player.Actor.Clips.Length
                               && _player.Actor.Clips[drinkIdx].AnimLength > 0.05f)
@@ -36231,11 +36241,39 @@ void main()
     // SC-POTION-DRINK — DS1 plays a drink gesture on potion use and won't let
     // the hero swing/cast until it finishes. Seconds of remaining lock; while
     // > 0 the raise animation is held and StartPlayerSwing / BeginPlayerCast /
-    // auto-defend all refuse to start a new action. Movement is NOT gated (you
-    // can walk while drinking, matching DS1).
+    // auto-defend all refuse to start a new action, and the hero stands still:
+    // drinking stops the walk and world clicks wait until it is done.
     private float _playerDrinkRemaining;
     private const float PotionDrinkSeconds = 0.9f;
     private bool PlayerDrinking => _playerDrinkRemaining > 0f;
+
+    /// <summary>End everything the hero was doing so the drink plays in
+    /// place: the walk, the swing or cast in progress, and every queued
+    /// order (attack, cast, pickup, break, lever, lock, chest).</summary>
+    private void StopHeroForDrink()
+    {
+        EndPlayerAttackLoop();
+        _playerFollower?.SetTarget(_playerFollower.Position);
+        _pendingAttackTarget = null;
+        _pendingCastTarget = null;
+        _pendingCastProp = null;
+        _pendingBreakProp = null;
+        _pendingPickupPile = null;
+        _pendingLeverUse = null;
+        _pendingLockedUse = null;
+        _pendingChestUse = null;
+        _lmbWorldMoveHeld = false;
+    }
+
+    /// <summary>A world click (move, attack, cast, talk, use) is ignored while
+    /// the hero drinks, when the hero is in the selection; companions alone
+    /// still take orders.</summary>
+    private bool HeroDrinkBlocksClick()
+    {
+        if (!PlayerDrinking || !_selectedPartyIdx.Contains(0)) return false;
+        Console.WriteLine($"[potion] click ignored: drinking ({_playerDrinkRemaining:F2}s left)");
+        return true;
+    }
     // SC-POTION-DRINK-BOTTLE — while the raise gesture plays we swap the weapon
     // for the potion bottle in the hero's hand, tinted by the potion type
     // (DS1 ptn_potion.gas: m_i_glb_bottle-potion textured b_i_glb_bottle-red-01
