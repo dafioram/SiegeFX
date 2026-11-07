@@ -56,7 +56,10 @@ A save converted from the original game (`siegefx save import`) sets
 `Player.SpawnNode` (a terrain node) and `Player.SpawnOffset` (the offset in
 it) instead of an actor row. The load builds the hero's row from them, stands
 companions with no position beside the hero, and keeps the game's camera and
-facing. Once the game saves again, the file is an ordinary SiegeFX save.
+facing. The hero's look comes by name (`Player.Variant.HeadMesh`, `SkinTexture`,
+`HairTexture`, `ShirtTexture`, `PantsTexture`, as the original wrote them); the
+load places each in the character creator's lists. Once the game saves again,
+the file is an ordinary SiegeFX save.
 
 ## Known gaps
 
