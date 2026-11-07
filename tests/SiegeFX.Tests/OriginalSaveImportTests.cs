@@ -35,6 +35,7 @@ public class OriginalSaveImportTests
                     [member]
                     {
                         combat_orders = co_limited;
+                        custom_head = test_hlmt_head-03;
                         focus_orders = fo_strongest;
                         movement_orders = mo_hold;
                         screen_name = "Wren";
@@ -70,7 +71,7 @@ public class OriginalSaveImportTests
                             uber_level = 3.7;
                             uber_xp = 425;
                         }
-                        [skins] { 0 = test_skin_03,test_hair_002; }
+                        [skins] { 0 = test_skin_03,test_hair_002; 1 = test_pant_005,test_shrt_004; }
                     }
                 }
                 [1]
@@ -207,6 +208,17 @@ public class OriginalSaveImportTests
     }
 
     [Fact]
+    public void The_look_is_carried_by_name()
+    {
+        // custom_head and both [skins] rows (skin + hair; pants + shirt), as
+        // the original writes them; the game places the names in its creator.
+        var v = Import(world: World()).Save.Player!.Variant!;
+        Assert.Equal("test_hlmt_head-03", v.HeadMesh);
+        Assert.Equal(("test_skin_03", "test_hair_002"), (v.SkinTexture, v.HairTexture));
+        Assert.Equal(("test_shrt_004", "test_pant_005"), (v.ShirtTexture, v.PantsTexture));
+    }
+
+    [Fact]
     public void Worn_gear_active_weapons_and_spells_land_in_their_slots()
     {
         var r = Import(world: World());
@@ -223,7 +235,7 @@ public class OriginalSaveImportTests
         Assert.Equal("test_spell_a", p.Spellbook!.PrimarySpell);
         Assert.Equal(["test_spell_b", "test_spell_c", "test_spell_d"], p.Spellbook.Placed);
         Assert.Contains(r.Notes, n => n.Contains("il_somewhere_new"));
-        Assert.Contains(r.Notes, n => n.Contains("test_skin_03"));
+        Assert.DoesNotContain(r.Notes, n => n.Contains("appearance"));   // the look is carried
     }
 
     [Fact]

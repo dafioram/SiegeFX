@@ -63,6 +63,9 @@ static class SaveCommands
         Console.WriteLine($"  hero       : {p.HeroName} ({p.Variant?.Gender})  level {p.Level}  xp {p.TotalXp}  " +
                           $"str {p.Strength:0.#} dex {p.Dexterity:0.#} int {p.Intelligence:0.#}  gold {p.Gold}");
         Console.WriteLine($"  skill xp   : melee {p.SkillXp[0]}  ranged {p.SkillXp[1]}  nature {p.SkillXp[2]}  combat {p.SkillXp[3]}");
+        if (p.Variant is { } look)
+            Console.WriteLine($"  look       : head {look.HeadMesh ?? "-"}  skin {look.SkinTexture ?? "-"}  hair {look.HairTexture ?? "-"}  " +
+                              $"shirt {look.ShirtTexture ?? "-"}  pants {look.PantsTexture ?? "-"}");
         Console.WriteLine($"  worn       : {string.Join(", ", p.Inventory.Where(e => e.Slot.Length > 0).Select(e => $"{e.Slot["equipped:".Length..]}={e.Reference}"))}");
         Console.WriteLine($"  pack       : {string.Join(", ", p.Inventory.Where(e => e.Slot.Length == 0).Select(e => e.Reference))}");
         var heroRow = save.Actors.FirstOrDefault(a => a.Scid == OriginalSaveImport.HeroScid);

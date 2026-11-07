@@ -100,8 +100,7 @@ public static class OriginalSaveImport
         p.Intelligence = (float)Skill(hero, "intelligence");
         if (p.Strength <= 0 || p.Dexterity <= 0 || p.Intelligence <= 0)
             notes.Add("hero: an attribute is missing from the party file; the game keeps its starting value");
-        if (hero.Skins.Count > 0)
-            notes.Add($"hero: appearance not carried, only the gender ({p.Variant.Gender}); original skins: {string.Join(" / ", hero.Skins)}");
+        ApplyLook(hero, p.Variant, notes);
         var spells = new SpellbookSnapshot();
         p.Inventory.AddRange(Items(hero, $"hero '{hero.ScreenName}'", notes, spells, out var heroWorn));
         // The party file lists the worn spellbook but not the spells in it;
@@ -277,6 +276,27 @@ public static class OriginalSaveImport
             (long)Math.Round(Xp(m, "nature_magic")),
             (long)Math.Round(Xp(m, "combat_magic")),
         ];
+    }
+
+    /// <summary>The look by name: <c>custom_head</c> (a head mesh, or
+    /// "default" for the body's own) and the <c>[skins]</c> rows, which list
+    /// the creator's textures ("b_c_gah_fb_skin_007,b_c_gah_fb_hair_005",
+    /// "b_c_pos_a1_pant_005,b_c_pos_a1_shrt_004"). The game turns the names into
+    /// its creator positions on load.</summary>
+    static void ApplyLook(OriginalPartyMember hero, HeroVariantSnapshot v, List<string> notes)
+    {
+        if (hero.CustomHead.Length > 0) v.HeadMesh = hero.CustomHead;
+        foreach (var row in hero.Skins)
+            foreach (var raw in row.Split(','))
+            {
+                var tex = raw.Trim();
+                if (tex.Length == 0) continue;
+                if (tex.Contains("_skin_", StringComparison.OrdinalIgnoreCase)) v.SkinTexture = tex;
+                else if (tex.Contains("_hair_", StringComparison.OrdinalIgnoreCase)) v.HairTexture = tex;
+                else if (tex.Contains("_shrt_", StringComparison.OrdinalIgnoreCase)) v.ShirtTexture = tex;
+                else if (tex.Contains("_pant_", StringComparison.OrdinalIgnoreCase)) v.PantsTexture = tex;
+                else notes.Add($"hero: appearance texture '{tex}' not recognized; the creator's first stands in");
+            }
     }
 
     static double Skill(OriginalPartyMember m, string name) => m.Skills.TryGetValue(name, out var s) ? s.Level : 0;
