@@ -5083,6 +5083,10 @@ public sealed class RenderHost : IDisposable
     private double _portraitRefreshAt = -1;
     private int _portraitChainLeft;
     private const int PortraitPx = 128;
+    // The live portrait's vertical view angle and shape: the head fills the
+    // frame, and the shape is the frames' (gas rect 13,6,52,52 = 39×46).
+    private const float PortraitFov = 0.21f;
+    private const float PortraitAspect = 39f / 46f;
 
     /// <summary>SC-VIEW-ROTATE — render the full equipped character to the
     /// 256² view target at the current drag yaw. Same studio-lit FBO recipe
@@ -5330,14 +5334,16 @@ public sealed class RenderHost : IDisposable
         var face = _playerFacing.LengthSquared() > 0.01f
             ? Vector3.Normalize(new Vector3(_playerFacing.X, 0f, _playerFacing.Z))
             : Vector3.UnitZ;
-        // Tight FACE crop: same ~1.15u standoff (close-in would fisheye the
-        // nose) but a telephoto FOV so the head fills the 128² cell — the
-        // old 0.50 rad framed a whole bust with visible shoulders. Aim rides
-        // a touch above the head bone (neck pivot) to center the face.
+        // Face crop as in the original: the head, crown to chin, fills the
+        // frame (0.21 rad at the ~1.15u standoff shows ~0.24u; close-in would
+        // fisheye the nose). Aim rides a touch above the head bone (neck
+        // pivot) to center the face. The square texture is drawn stretched
+        // into the portrait frames (AWP 39×46, inventory header 24×28), so
+        // it renders at their shape and the face is not drawn tall.
         var eye = headWorld + face * 1.15f + new Vector3(0f, 0.14f, 0f);
         var at  = headWorld + new Vector3(0f, 0.08f, 0f);
         var pvp = Matrix4x4.CreateLookAt(eye, at, Vector3.UnitY)
-                * Matrix4x4.CreatePerspectiveFieldOfView(0.34f, 1f, 0.05f, 50f);
+                * Matrix4x4.CreatePerspectiveFieldOfView(PortraitFov, PortraitAspect, 0.05f, 50f);
 
         _skinShader.Use();
         _skinShader.SetMatrix4("uViewProj", pvp);
