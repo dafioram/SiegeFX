@@ -1999,6 +1999,9 @@ public sealed class RenderHost : IDisposable
         // re-engaging follow mode on the panel — releases them.
         public Vector3? MoveOrder;
         public ActorRenderState? OrderedFoe;
+        // Seconds left of this member's potion drink: they stand still, take
+        // no orders and don't fight until it reaches 0 (as the hero does).
+        public float DrinkRemaining;
         public bool FollowSuspended;
         // Seconds a follower has been TRYING to reach its slot without
         // actually moving (blocked path / lost around geometry). Drives the
@@ -2937,6 +2940,15 @@ public sealed class RenderHost : IDisposable
             // would fight the stream. It still holds its rail/inventory slot.
             if (m.IsNetworkOwned) continue;
             m.Actor.Host.TickOverride(dt);
+            // Drinking a potion: stand still, no orders, no fighting.
+            if (m.DrinkRemaining > 0f)
+            {
+                m.DrinkRemaining = MathF.Max(0f, m.DrinkRemaining - dt);
+                m.Brain.ForceIdle();
+                var df = m.Brain.Wander.Follower;
+                df.SetTarget(df.Position);
+                continue;
+            }
             var follower = m.Brain.Wander.Follower;
             // SC-NAV-PARTIAL-PATH — members execute player orders, so their
             // followers get the same opt-in partial-path the hero has.
@@ -30924,6 +30936,7 @@ void main()
         {
             if (m.PartyIndex <= 0 || m.IsDead || m.Brain is null || m.IsNetworkOwned) continue;
             if (m.Actor.Combat.Downed) continue;   // SC-DOWNED — can't move
+            if (m.DrinkRemaining > 0f) continue;   // drinking: no orders until done
             if (!_selectedPartyIdx.Contains(m.PartyIndex)) continue;
             var slot = SnapToNavmesh(
                 PartyFormationSlot(_partyFormation, m.PartyIndex, dest, face), dest);
@@ -30952,6 +30965,7 @@ void main()
         {
             if (m.PartyIndex <= 0 || m.IsDead || m.Brain is null || m.IsNetworkOwned) continue;
             if (m.Actor.Combat.Downed) continue;   // SC-DOWNED — can't fight
+            if (m.DrinkRemaining > 0f) continue;   // drinking: no orders until done
             if (!_selectedPartyIdx.Contains(m.PartyIndex)) continue;
             m.OrderedFoe = target;
             m.MoveOrder = null;
@@ -32801,11 +32815,24 @@ void main()
                           $"({(newFill <= 0.004f ? "bottle empty" : $"{newFill:P0} left")})");
         if (!isHero)
         {
-            // Companion drink: cue + gesture at the member; no action lock
-            // (their brain resumes on its own next tick).
+            // Companion drink: like the hero, the member stops where it
+            // stands (its walk and orders end), drinks in place, and takes no
+            // orders and doesn't fight until the drink is done
+            // (TickPartyFollowers holds it while DrinkRemaining runs).
             RegisterAndPlayVoiceCue("s_e_potion_drink", who.CurrentTransform.Translation);
-            if (who.Actor.GetClipIndex("drnk") >= 0)
-                who.Actor.PlayChoreOnce("drnk", PotionDrinkSeconds);
+            int mIdx = who.Actor.GetClipIndex("drnk");
+            float mLen = (mIdx >= 0 && mIdx < who.Actor.Clips.Length && who.Actor.Clips[mIdx].AnimLength > 0.05f)
+                ? who.Actor.Clips[mIdx].AnimLength : PotionDrinkSeconds;
+            who.MoveOrder = null;
+            who.OrderedFoe = null;
+            who.DrinkRemaining = mLen;
+            if (who.Brain is not null)
+            {
+                who.Brain.ForceIdle();
+                var mf = who.Brain.Wander.Follower;
+                mf.SetTarget(mf.Position);
+            }
+            if (mIdx >= 0) who.Actor.PlayChoreOnce("drnk", mLen);
             return true;
         }
         // SC-AUDIO-ITEMS — DS1 [global_voice] drink cue (priority always).
