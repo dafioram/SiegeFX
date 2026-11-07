@@ -78,10 +78,11 @@ Every party member — hero, companions, pack mule — has the same shape.
 | `gold` | `30` | Also in the trailing `[party]` block; both changed together |
 | `movement_orders`, `combat_orders`, `focus_orders`, `disposition_orders` | see [Orders](#field-commands-orders) | Per member |
 | `selected_active_location` | `il_active_melee_weapon` | Active weapon slot |
-| `custom_head`, `pack_only`, `grid_x_offset`, `grid_y_offset`, `m_clientcachedengagedobject` | | Not yet interpreted |
+| `custom_head` | `m_c_gah_fb_hlmt_head-02`, or `default` | The creator's Head: one of the head meshes, or `default` for the body's own head (the farm boy's bald one) |
+| `pack_only`, `grid_x_offset`, `grid_y_offset`, `m_clientcachedengagedobject` | | Not yet interpreted |
 | `[inventory]` | `[N] { template_name; inv_location; equip_slot; grid_x; grid_y; gold_value; }` | See below |
 | `[skills]` | `<skill>_level`, `<skill>_xp` | strength, dexterity, intelligence, melee, ranged, nature_magic, combat_magic, and `uber` (the overall character level) |
-| `[skins]` | `0 = b_c_gah_fg_skin_010,b_c_gah_fg_hair_007;` | Appearance textures |
+| `[skins]` | `0 = b_c_gah_fg_skin_010,b_c_gah_fg_hair_007;` `1 = b_c_pos_a1_pant_005,b_c_pos_a1_shrt_004;` | The creator's textures: row 0 the skin and the hair over it, row 1 the pants and the shirt |
 
 **Inventory.** Row order is not meaningful — two saves seconds apart listed the
 same 18 items in a different order. Equipped items carry `equip_slot`
@@ -383,6 +384,7 @@ siegefx save diff <a> <b> --object=door  # every value that changed on matching 
 siegefx save locate <World.dsmap> 0x01c00b13   # where a save object was placed in the map
 siegefx save locate <World.dsmap> edgaar       # placements by template name
 siegefx save retired <file> <World.dsmap>      # placements the game will not create again
+siegefx save import <file> [--out=PATH]        # convert into a SiegeFX save (see Importing)
 ```
 
 `retired` looks up every SCID in `m_retiredscidcoll` in the save's own map
@@ -405,6 +407,39 @@ still saved (corpses, mostly).
    `skritengine` and `godb` are positional lists (one new object shifts
    every later index), so they always show churn and are listed last.
 
+## Importing into SiegeFX
+
+`siegefx save import` (`OriginalSaveImport`) converts a save into a SiegeFX
+save, written to SiegeFX's save folder so the Load Game window lists it as
+`Original: <screen name>`. Loading it relaunches into the saved region like
+any other save.
+
+| Carried | From |
+|---|---|
+| Region, hero's spot | `info.gas` `map_name`, `region`, `teleport`: the save names the node and offset (`SpawnNode`, `SpawnOffset`) and the game resolves them against the region layout once it is up |
+| Hero name, gender, play time, thumbnail | `info.gas`; gender from the template (`farmboy` / `farmgirl`); `thumb.bmp` |
+| XP, level, attributes, skill XP | `[skills]`: `uber_xp`, `uber_level`, `strength/dexterity/intelligence_level`, `melee/ranged/nature_magic/combat_magic_xp`. The original counts levels from 0 (a new hero writes `melee_level = 0`, `uber_level = 0`; 0.0564 after one krug, 3.94 XP); SiegeFX's level math counts from 1, so the level is `floor(uber_level) + 1` |
+| Gold, orders, active slot | `[party] gold`; the `*_orders`; `selected_active_location` |
+| Items | `[inventory]`: `equip_slot` → worn; `il_active_melee_weapon` / `il_active_ranged_weapon` → weapon hand / ranged slot; `il_active_*_spell`, `il_spell_*` → the spellbook; the rest → the pack |
+| Spells in the worn book | `party.gas` lists the book but not the spells in it (seen in a DS1 save: the book worn, no spell rows). They are the objects whose `m_parent` is the book's `m_goid`, the book's own parent being the hero's goid; the first becomes Active Spell 1 |
+| Life and mana | The hero's object (run-time, the hero's template) and each companion's: the `aspect` component's `life` and `mana`. A value not found starts full |
+| Tips | `/uigame/tutorial_tips`; an import with a world doesn't replay SiegeFX's intro tips |
+| Loot on the ground | Objects made at run time (`m_scid` 0xfffffffe) with no holder (`m_parent` 0), not inside an inventory, with a `gui` component naming an `inventory_icon` (a spawned monster has none) and a `placement` `position` (node + offset, as `teleport`). Gold's amount is the `aspect` component's `gold_value` (a 6-gold pile: picked up, the object leaves the save and party gold goes 30 → 36). The game places each pile on its node; one on a node outside the region is dropped |
+| Look | `custom_head` and the `[skins]` textures, by name (`HeadMesh`, `SkinTexture`, `HairTexture`, `ShirtTexture`, `PantsTexture`); the game places each in its creator lists when it loads (`default` = the body's own head, a hair in that head's own set), so no creator position is guessed here |
+| Formation | `m_pformation/m_name` on the party object (`/godb/m_globaldb/33/m_componentcoll/1/m_pformation` in one save; `"wedge"` → `"circle"` after switching formation, which also set `m_spotwidth`/`m_spotlength` 0 → 1): circle, column, double_column, line → Row, double_line → DoubleRow, wedge → Pyramid |
+| Companions | Other members; each joins on its own map placement when exactly one saved object has its template, otherwise as a new actor; it stands beside the hero |
+| Quests | `m_quests`: active or completed |
+| Flags | Auditor entries holding a yes/no value, as named world bools |
+| What stays gone | Retired SCIDs as dead actors; retired and carried (`m_isinsideinventory`) map items as consumed pickups |
+
+Not carried yet: item enchantments (the party file
+names only the base template), doors, chests, levers and other
+`m_scidbitscoll` state, the auditor's counters. A
+`.dsparty` has no world, so its character starts the campaign at `fh_r1`.
+Legends of Aranna saves are refused. The importer prints a note for every
+item location it does not know, which is how the remaining
+`selected_active_location` and spell locations get confirmed.
+
 ## Open questions
 
 Roughly in order of how much they block importing and writing saves.
@@ -423,7 +458,7 @@ Roughly in order of how much they block importing and writing saves.
 3. **What the original checks on load.** Does it verify `fubi_manifest`,
    the tank manifest CRCs, or the tank's own CRCs? Test by changing one byte of
    a copy (e.g. gold in `party.gas`) and loading it.
-4. **Unread `party.gas` fields:** `custom_head`, `pack_only`,
+4. **Unread `party.gas` fields:** `pack_only`,
    `grid_x_offset`/`grid_y_offset`, `m_clientcachedengagedobject`,
    `disposition_orders` (seen: `ad_defensive`, `ad_offensive`).
 5. **Value types without a size hint:** 4-byte values are int, float or id —
