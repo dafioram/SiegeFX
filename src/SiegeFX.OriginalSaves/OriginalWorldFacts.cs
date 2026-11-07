@@ -130,6 +130,21 @@ public static class OriginalWorldFacts
         return map;
     }
 
+    /// <summary>The party's formation as the original names it
+    /// (<c>m_pformation/m_name</c>: "wedge", "circle", …, the block names of
+    /// world/ai/formations.gas). It sits on the party object's component
+    /// (<c>/godb/m_globaldb/33/m_componentcoll/1/m_pformation</c> in one save:
+    /// wedge → circle after switching formation), so it is found by name, not
+    /// by index.</summary>
+    public static string? Formation(XferTree world)
+    {
+        foreach (var o in world.Find(ObjectsPath)?.Children ?? [])
+            foreach (var n in o.DescendantsAndSelf())
+                if (n.Name == "m_pformation" && n.Value("m_name")?.AsText is { Length: > 0 } name)
+                    return name;
+        return null;
+    }
+
     public const string ScidBitsPath = "/godb/m_scidbitscoll";
 
     /// <summary>Per-SCID bits (<c>m_bits</c>), kept whether or not the

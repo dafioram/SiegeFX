@@ -172,7 +172,8 @@ public sealed record OriginalPartyMember(
     string ScreenName, string TemplateName, string ActorClass, long Gold,
     OriginalOrders Orders, string SelectedActiveLocation,
     IReadOnlyDictionary<string, (double Level, double Xp)> Skills,
-    IReadOnlyList<string> Skins, IReadOnlyList<OriginalItem> Inventory)
+    IReadOnlyList<string> Skins, IReadOnlyList<OriginalItem> Inventory,
+    string CustomHead = "")
 {
     /// <summary>The overall character level DS1 shows ("uber" skill).</summary>
     public double Level => Skills.TryGetValue("uber", out var s) ? s.Level : 0;
@@ -196,7 +197,7 @@ public sealed record OriginalPartyMember(
             long.TryParse(a.Get("gold"), out var g) ? g : 0,
             new OriginalOrders(a.Get("movement_orders"), a.Get("combat_orders"),
                                a.Get("focus_orders"), a.Get("disposition_orders")),
-            a.Get("selected_active_location"), skills, skins, items);
+            a.Get("selected_active_location"), skills, skins, items, a.Get("custom_head"));
     }
 }
 

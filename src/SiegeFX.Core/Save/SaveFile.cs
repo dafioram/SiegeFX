@@ -154,6 +154,14 @@ public sealed class SaveFile
     /// actor (matched by scid when it exists in the region, respawned from
     /// the template when it doesn't) and restores its backpack/equipment.</summary>
     public List<CompanionSnapshot> Party { get; set; } = new();
+
+    /// <summary>The original-game save this one was converted from (its
+    /// path), or empty for a save SiegeFX wrote. An import has no camera or
+    /// facing of its own, so the load keeps the game's defaults for those; it
+    /// places the hero from <see cref="PlayerSnapshot.SpawnNode"/> and the
+    /// companions beside the hero. The game writes its own saves after that,
+    /// so the field doesn't survive a re-save. Older builds ignore it.</summary>
+    public string ImportedFrom { get; set; } = "";
 }
 
 /// <summary>v13 SC-PARTY-PERSIST — one recruited companion.</summary>
@@ -300,6 +308,11 @@ public sealed class ElevatorStopSnapshot
 public sealed class LootPileSnapshot
 {
     public Vec3 Position { get; set; }
+    /// <summary>An imported pile's spot as the original stores it: a terrain
+    /// node (0 = none, use <see cref="Position"/>) and the offset inside it;
+    /// the load turns it into <see cref="Position"/> once the layout is up.</summary>
+    public uint Node { get; set; }
+    public Vec3 NodeOffset { get; set; }
     public List<LootEntrySnapshot> Entries { get; set; } = new();
 }
 
@@ -465,6 +478,14 @@ public sealed class PlayerSnapshot
     /// Empty list on v7-and-earlier loads — those saves predate the SCID-
     /// tracking and re-spawn every world inventory item on reload.</summary>
     public List<uint> ConsumedInventoryScids { get; set; } = new();
+
+    /// <summary>Where an imported save puts the hero, as the original game
+    /// stores a position: a terrain node (0 = none) and the offset inside it.
+    /// The load resolves it against the region layout, which only exists once
+    /// the region is up. SiegeFX's own saves leave it 0 and carry the hero's
+    /// world position in <see cref="SaveFile.Actors"/>.</summary>
+    public uint SpawnNode { get; set; }
+    public Vec3 SpawnOffset { get; set; }
 }
 
 /// <summary>Phase 21d-2a-viii-c — frozen snapshot of the character creator's
@@ -500,6 +521,18 @@ public sealed class HeroVariantSnapshot
     public int StyleIdx { get; set; } = -1;
     public int ShirtIdx { get; set; } = -1;
     public int PantsIdx { get; set; } = -1;
+
+    // The look by name, as the original game's save writes it: an imported
+    // save carries these, and the game turns them into the creator's
+    // positions above when it loads (null = not given; SiegeFX's own saves
+    // write the positions only).
+    /// <summary>The head mesh (<c>custom_head</c>), or "default" for the
+    /// body's own head.</summary>
+    public string? HeadMesh { get; set; }
+    public string? SkinTexture { get; set; }
+    public string? HairTexture { get; set; }
+    public string? ShirtTexture { get; set; }
+    public string? PantsTexture { get; set; }
 }
 
 /// <summary>One journal entry as stored in a save. Mirrors
